@@ -50,12 +50,29 @@ PROTECTED = [Depends(guard.require_api_key), Depends(guard.rate_limit)]
 SSE_DONE = "data: [DONE]\n\n"
 NO_LOG_MSG = "未解析到任何日志"
 
+# /context 接口最多展示多少条日志。
+# 只影响「前端展示」，不影响实际送给模型的日志（那由 app.context 决定）。
+# 实测 2 万条日志的响应体约 4MB、前端要渲染 2 万行 DOM，浏览器会卡；
+# 而 500 行既能覆盖绝大多数实际粘贴量，渲染也毫无压力。
+MAX_CONTEXT_DISPLAY = 500
+
 
 class ParseRequest(BaseModel):
     text: str
 
 
 class DiagnoseRequest(BaseModel):
+    text: str
+
+
+class TextRequest(BaseModel):
+    """通用文本请求体。
+
+    存在的理由：把日志放在 URL query string 里有长度上限
+    （实测约 32K 字符，再长会被 ASGI 服务器直接以 400 拒绝），
+    而日志往往很长。POST 版接口用 JSON body 传，没有这个问题。
+    """
+
     text: str
 
 
@@ -74,9 +91,81 @@ def stats():
     return {
         "model": current_model(),
         "prompt_version": PROMPT_VERSION,
+        "context": {
+            "enabled": context_mod.context_enabled(),
+            "window": context_mod.context_window(),
+            "max_logs": context_mod.context_max_logs(),
+            "note": "决定把哪些日志送给模型；参数已纳入缓存键",
+        },
         "metrics": metrics.store.summary(),
         "cache": cache_mod.cache.snapshot(),
         "rate_limit": guard.limiter.snapshot(),
+    }
+
+
+@app.get("/context", dependencies=PROTECTED)
+def context_preview(text: str):
+    """预览上下文聚合结果（GET 版）。
+
+    **不调用大模型，因此不产生任何费用** —— 前端用它把「聚合过程」显示出来，
+    否则用户只能看到一份诊断 JSON，完全感知不到上下文聚合在起作用。
+
+    ⚠️ 日志较长时请用 POST 版，query string 有长度上限。
+    """
+    return _context_payload(text)
+
+
+@app.post("/context", dependencies=PROTECTED)
+def context_preview_post(req: TextRequest):
+    """预览上下文聚合结果（POST 版，无长度限制）。"""
+    return _context_payload(req.text)
+
+
+def _context_payload(text: str) -> dict:
+    logs = parse_text(text)
+    if not logs:
+        return {"error": NO_LOG_MSG}
+
+    ctx = build_context(logs)
+    selected_ids = {id(log) for log in ctx.logs}
+
+    # 决定「展示」哪些日志。
+    # 为什么不无脑全返回：实测 2 万条日志的响应体接近 4MB，前端要渲染同样多的 DOM 行，
+    # 浏览器会明显卡顿甚至卡死。而用户真正关心的只有「锚点附近」和「被选中的」那些。
+    # 注意这只影响展示，不影响实际送给模型的日志（那由 build_context 决定）。
+    display_limited = len(logs) > MAX_CONTEXT_DISPLAY
+    if display_limited:
+        half = MAX_CONTEXT_DISPLAY // 2
+        lo = max(0, min(ctx.anchor_index - half, len(logs) - MAX_CONTEXT_DISPLAY))
+        hi = lo + MAX_CONTEXT_DISPLAY
+        keep = set(range(lo, hi)) | {
+            i for i, log in enumerate(logs) if id(log) in selected_ids
+        }
+        display_indices = sorted(keep)
+    else:
+        display_indices = list(range(len(logs)))
+
+    return {
+        "total_parsed": ctx.total_parsed,
+        "selected": ctx.size,
+        "anchor_index": ctx.anchor_index,
+        "truncated": ctx.truncated,
+        "enabled": ctx.enabled,
+        "window": context_mod.context_window() if ctx.enabled else 0,
+        "max_logs": context_mod.context_max_logs() if ctx.enabled else 1,
+        "display_limited": display_limited,
+        "displayed": len(display_indices),
+        "logs": [
+            {
+                "index": i,
+                "level": logs[i].level,
+                "module": logs[i].module,
+                "message": logs[i].message,
+                "is_anchor": i == ctx.anchor_index,
+                "selected": id(logs[i]) in selected_ids,
+            }
+            for i in display_indices
+        ],
     }
 
 
@@ -163,7 +252,22 @@ def diagnose(req: DiagnoseRequest):
 # 诊断（SSE 流式）
 # --------------------------------------------------------------------------- #
 @app.get("/diagnose/stream", dependencies=PROTECTED)
-async def diagnose_stream(text: str):
+async def diagnose_stream_get(text: str):
+    """SSE 流式诊断（GET 版）。
+
+    ⚠️ 日志较长时请改用 POST 版：query string 有长度上限
+    （实测约 32K 字符，再长会被 ASGI 服务器以 400 拒绝）。
+    """
+    return _stream_response(text)
+
+
+@app.post("/diagnose/stream", dependencies=PROTECTED)
+async def diagnose_stream_post(req: TextRequest):
+    """SSE 流式诊断（POST 版）。日志放在 JSON body 里，没有长度限制。"""
+    return _stream_response(req.text)
+
+
+def _stream_response(text: str) -> StreamingResponse:
     """SSE 流式诊断：逐 token 返回诊断 JSON 文本。"""
     started = time.perf_counter()
 

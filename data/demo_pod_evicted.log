@@ -1,0 +1,10 @@
+2026-09-18 21:15:00,110 WARN  [node-agent] kubelet - Pod order-service-7f9c4d-x2k9 被驱逐：The node was low on resource: memory. Threshold quantity: 100Mi
+2026-09-18 21:15:01,220 INFO  [health] com.example.health.HealthChecker - 健康检查通过
+2026-09-18 21:15:02,330 INFO  [metrics] com.example.metrics.Reporter - 指标上报成功
+2026-09-18 21:15:03,440 INFO  [health] com.example.health.HealthChecker - 健康检查通过
+2026-09-18 21:15:04,550 ERROR [gateway] com.example.gateway.OrderClient - 调用订单服务失败: connection refused
+	at com.example.gateway.OrderClient.post(OrderClient.java:47)
+	at com.example.gateway.RouteHandler.dispatch(RouteHandler.java:88)
+2026-09-18 21:15:05,660 ERROR [web] com.example.web.OrderController - 下单失败: 订单服务不可用
+2026-09-18 21:15:06,770 INFO  [health] com.example.health.HealthChecker - 健康检查通过
+2026-09-18 21:15:07,880 WARN  [gateway] com.example.gateway.CircuitBreaker - 订单服务熔断器已打开，后续请求将快速失败

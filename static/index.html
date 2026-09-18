@@ -9,12 +9,42 @@
   h1 { font-size: 22px; }
   p { color: #475569; }
   textarea { width: 100%; height: 180px; font-family: Consolas, monospace; font-size: 13px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; box-sizing: border-box; }
-  button { margin-top: 12px; padding: 10px 24px; font-size: 15px; background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+  .btn-row { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+  button { padding: 10px 24px; font-size: 15px; background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
   button:disabled { background: #94a3b8; cursor: not-allowed; }
+  button.ghost { background: #fff; color: #475569; border: 1px solid #cbd5e1; }
+  button.ghost:hover { background: #f1f5f9; }
   .card { background: #fff; border-radius: 8px; padding: 16px; margin-top: 16px; border: 1px solid #e2e8f0; display: none; }
   .card h3 { margin: 0 0 10px; font-size: 15px; }
   pre { white-space: pre-wrap; word-break: break-word; font-size: 13px; color: #334155; margin: 0; }
   #diagResult { min-height: 120px; }
+
+  /* 上下文聚合展示 */
+  .ctx-summary { font-size: 14px; color: #334155; margin: 0 0 4px; line-height: 1.7; }
+  .ctx-summary b { color: #2563eb; }
+  .ctx-hint { font-size: 12.5px; color: #94a3b8; margin: 0 0 10px; }
+  .logrow { display: flex; gap: 8px; align-items: baseline; padding: 5px 8px; border-radius: 6px; border-left: 3px solid transparent; font-family: Consolas, monospace; font-size: 12.5px; line-height: 1.55; }
+  .logrow.sel { background: #f8fafc; border-left-color: #2563eb; }
+  .logrow.sel.anchor { background: #eff6ff; border-left-color: #dc2626; }
+  .logrow.skip { opacity: .4; }
+  .logrow .idx { flex: 0 0 26px; color: #94a3b8; text-align: right; }
+  .logrow .lv { flex: 0 0 52px; font-weight: 700; }
+  .lv-INFO { color: #64748b; }
+  .lv-WARN { color: #b45309; }
+  .lv-ERROR, .lv-CRITICAL, .lv-FATAL { color: #dc2626; }
+  .logrow .msg { flex: 1; word-break: break-word; color: #334155; }
+  .logrow .tag { flex: 0 0 auto; font-size: 11px; padding: 1px 7px; border-radius: 4px; white-space: nowrap; }
+  .gaprow { text-align: center; color: #94a3b8; font-size: 12px; padding: 4px 0; font-family: Consolas, monospace; }
+  .tag.anchor { background: #fee2e2; color: #b91c1c; }
+  .tag.sel { background: #dbeafe; color: #1d4ed8; }
+  .tag.skip { background: #e2e8f0; color: #64748b; }
+  .legend { font-size: 12px; color: #94a3b8; margin-top: 10px; }
+
+  /* 服务端版本过旧时的提示条 */
+  .banner { display: none; background: #fef3c7; border: 1px solid #fcd34d; color: #92400e;
+            border-radius: 8px; padding: 12px 14px; margin-top: 16px; font-size: 14px; line-height: 1.75; }
+  .banner b { color: #b45309; }
+  .banner code { background: #fff7ed; padding: 1px 6px; border-radius: 4px; font-family: Consolas, monospace; }
 </style>
 </head>
 <body>
@@ -26,11 +56,33 @@ Traceback (most recent call last):
   File &quot;app/db.py&quot;, line 18, in insert
     raise ConnectionError(&quot;connect timeout&quot;)
 ConnectionError: connect timeout"></textarea>
-<br>
-<button id="btn" onclick="diagnose()">开始诊断</button>
+<div class="btn-row">
+  <button id="btn" onclick="diagnose()">开始诊断</button>
+  <button id="clearBtn" class="ghost" onclick="clearAll()">一键清除</button>
+  <span id="tip" style="font-size:13px;color:#94a3b8;"></span>
+</div>
+
+<div class="banner" id="staleBanner">
+  ⚠️ <b>服务端是旧版本</b> —— 网页是新版，但后端进程还在跑改动之前的代码。<br>
+  Python 代码在启动时就加载进内存了，<b>改了代码必须重启才生效</b>（网页文件是每次现读磁盘的，
+  所以会出现「页面是新的、接口是旧的」这种对不上的情况）。<br>
+  解决办法：<b>关掉那个黑色命令行窗口</b>，再重新双击 <code>app\run.py</code>。
+</div>
+
+<div class="card" id="ctxCard">
+  <h3>上下文聚合 —— 实际送给模型的日志</h3>
+  <p class="ctx-summary" id="ctxSummary"></p>
+  <p class="ctx-hint" id="ctxHint"></p>
+  <div id="ctxList"></div>
+  <div class="legend">
+    <span class="tag anchor">★ 锚点</span> 诊断的起点 ·
+    <span class="tag sel">已送模型</span> ·
+    <span class="tag skip">已丢弃</span>
+  </div>
+</div>
 
 <div class="card" id="parseCard">
-  <h3>解析结果</h3>
+  <h3>解析结果（结构化字段）</h3>
   <pre id="parseResult"></pre>
 </div>
 
@@ -40,6 +92,120 @@ ConnectionError: connect timeout"></textarea>
 </div>
 
 <script>
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// ---- 服务端版本检测 ----
+// Python 代码在启动时载入内存，改了代码不重启就不生效；而网页文件是每次现读磁盘的。
+// 于是会出现「页面是新版、接口是旧版」这种很迷惑的状态 —— 这里主动把它识别出来讲清楚。
+const STALE_MSG = "服务端是旧版本，缺少这个接口。请关掉那个命令行窗口，重新双击 app\\run.py 后再试。";
+
+function isStale(status) {
+  return status === 404 || status === 405;
+}
+
+function showStale() {
+  document.getElementById("staleBanner").style.display = "block";
+}
+
+async function checkServerVersion() {
+  try {
+    const r = await fetch("/context", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text: "version-check" }),
+    });
+    if (isStale(r.status)) showStale();
+  } catch (e) { /* 服务没起来时不在这里报错 */ }
+}
+
+function clearAll() {
+  document.getElementById("logInput").value = "";
+  ["ctxCard", "parseCard", "diagCard"].forEach(id => {
+    document.getElementById(id).style.display = "none";
+  });
+  document.getElementById("ctxList").innerHTML = "";
+  document.getElementById("ctxSummary").textContent = "";
+  document.getElementById("ctxHint").textContent = "";
+  document.getElementById("parseResult").textContent = "";
+  document.getElementById("diagResult").textContent = "";
+  const tip = document.getElementById("tip");
+  tip.textContent = "已清除";
+  setTimeout(() => { tip.textContent = ""; }, 1500);
+  document.getElementById("logInput").focus();
+}
+
+function renderContext(cj) {
+  const card = document.getElementById("ctxCard");
+  card.style.display = "block";
+  const sum = document.getElementById("ctxSummary");
+  const hint = document.getElementById("ctxHint");
+
+  if (cj.error) {
+    sum.textContent = cj.error;
+    hint.textContent = "";
+    document.getElementById("ctxList").innerHTML = "";
+    return;
+  }
+
+  if (!Array.isArray(cj.logs)) {
+    // 防御：接口返回了预期之外的结构（通常是服务端版本对不上）
+    sum.textContent = STALE_MSG;
+    hint.textContent = "";
+    document.getElementById("ctxList").innerHTML = "";
+    showStale();
+    return;
+  }
+
+  if (!cj.enabled) {
+    sum.innerHTML = `上下文聚合已<b>关闭</b>：解析出 ${cj.total_parsed} 条日志，`
+                  + `只把<b>锚点 1 条</b>送给模型（旧行为）。`;
+  } else if (cj.selected >= cj.total_parsed) {
+    sum.innerHTML = `解析出 <b>${cj.total_parsed}</b> 条日志，`
+                  + `<b>全部 ${cj.selected} 条</b>都送给了模型。`;
+  } else {
+    sum.innerHTML = `解析出 <b>${cj.total_parsed}</b> 条日志，`
+                  + `筛出 <b>${cj.selected}</b> 条送给模型`
+                  + `（窗口 ±${cj.window}，上限 ${cj.max_logs}${cj.truncated ? "，已触发裁剪" : ""}）。`;
+  }
+
+  const hints = [];
+  if (cj.display_limited) {
+    hints.push(`日志较多，下方只展示<b>锚点附近</b>与<b>被选中</b>的 ${cj.displayed} 条`
+             + `（完整共 ${cj.total_parsed} 条）。`);
+  }
+  if (!cj.display_limited && cj.enabled && cj.selected >= cj.total_parsed) {
+    hints.push("日志较短时通常会全选。粘贴一段长日志才能看到筛选和裁剪的效果。");
+  }
+  if (cj.enabled && cj.selected < cj.total_parsed) {
+    hints.push("被丢弃的主要是离锚点较远、级别又不高的日志。");
+  }
+  hint.innerHTML = hints.join(" ");
+
+  let prev = -1;
+  const rows = cj.logs.map(l => {
+    let gap = "";
+    if (prev >= 0 && l.index > prev + 1) {
+      gap = `<div class="gaprow">⋯ 省略 ${l.index - prev - 1} 条 ⋯</div>`;
+    }
+    prev = l.index;
+
+    const cls = l.selected ? (l.is_anchor ? "sel anchor" : "sel") : "skip";
+    let tag = "";
+    if (l.is_anchor) tag = '<span class="tag anchor">★ 锚点</span>';
+    else if (l.selected) tag = '<span class="tag sel">已送模型</span>';
+    else tag = '<span class="tag skip">已丢弃</span>';
+
+    return gap + `<div class="logrow ${cls}">`
+         + `<span class="idx">${l.index}</span>`
+         + `<span class="lv lv-${esc(l.level)}">${esc(l.level)}</span>`
+         + `<span class="msg">${esc(l.message)}</span>`
+         + tag + `</div>`;
+  }).join("");
+  document.getElementById("ctxList").innerHTML = rows;
+}
+
 async function diagnose() {
   const text = document.getElementById("logInput").value.trim();
   if (!text) return alert("请先粘贴日志");
@@ -65,9 +231,44 @@ async function diagnose() {
     parseRes.textContent = "解析失败: " + e;
   }
 
-  // 2) SSE 流式诊断接口
+  // 2) 上下文聚合预览（不调用模型，不花钱）
   try {
-    const resp = await fetch("/diagnose/stream?text=" + encodeURIComponent(text));
+    const c = await fetch("/context", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (isStale(c.status)) {
+      showStale();
+      document.getElementById("ctxSummary").textContent = STALE_MSG;
+      document.getElementById("ctxHint").textContent = "";
+      document.getElementById("ctxList").innerHTML = "";
+    } else {
+      renderContext(await c.json());
+    }
+  } catch (e) {
+    document.getElementById("ctxSummary").textContent = "上下文预览失败: " + e;
+  }
+
+  // 3) SSE 流式诊断接口
+  //    用 POST 而不是 GET：日志放 URL 里会有长度上限（实测约 32K 字符），
+  //    粘贴长日志时会被服务器以 400 拒绝。
+  try {
+    const resp = await fetch("/diagnose/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!resp.ok) {
+      if (isStale(resp.status)) {
+        showStale();
+        diagRes.textContent = STALE_MSG;
+      } else {
+        diagRes.textContent = `诊断失败: HTTP ${resp.status}\n${await resp.text()}`;
+      }
+      btn.disabled = false;
+      return;
+    }
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
@@ -93,6 +294,14 @@ async function diagnose() {
   }
   btn.disabled = false;
 }
+
+// Ctrl+Enter 快速诊断
+document.getElementById("logInput").addEventListener("keydown", e => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") diagnose();
+});
+
+// 页面一打开就检查服务端版本，避免用户对着 405 一脸问号
+checkServerVersion();
 </script>
 </body>
 </html>

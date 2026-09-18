@@ -6,7 +6,7 @@
 
 - **Python 3.11 + FastAPI + uvicorn**：API 服务与 SSE 流式输出
 - **DeepSeek API（OpenAI 兼容 SDK）**：结构化 JSON 诊断
-- **pytest**：单元测试（101 项全通过，覆盖解析器 / 鉴权 / 限流 / 缓存 / 度量 / 上下文聚合 / Prompt 与评测集结构）
+- **pytest**：单元测试（114 项全通过，覆盖解析器 / 鉴权 / 限流 / 缓存 / 度量 / 上下文聚合 / Prompt 与评测集结构）
 - **Docker / docker-compose**：容器化与本地编排
 - **Kubernetes（Docker Desktop 内置集群）**：Deployment + Service(LoadBalancer) + HPA + Secret 注入 + 探针
 
@@ -58,7 +58,7 @@ uvicorn app.main:app --reload --port 8000
 ## 测试
 
 ```bash
-pytest                              # 单元测试（101 项全通过）
+pytest                              # 单元测试（114 项全通过）
 python eval_hdfs.py                 # 解析器评测（Loghub HDFS_2k，2000 行）
 python eval_diagnosis.py            # 诊断质量评测（会真实调用模型，产生少量费用）
 python eval_diagnosis.py --from-git HEAD   # 评测历史版本的 Prompt，用于 A/B 对比
@@ -118,10 +118,16 @@ curl.exe -N "http://localhost:8080/diagnose/stream?text=2025-09-14%2010:23:46,78
 | --- | --- | --- |
 | `/health` | GET | 健康检查（K8s 探针使用，**不加鉴权**） |
 | `/parse` | POST | 解析日志，返回结构化字段列表（不调用模型，不产生费用） |
+| `/context` | GET / POST | **预览上下文聚合结果**：哪些日志会被送给模型。不调用模型，不产生费用 |
 | `/diagnose` | POST | 解析 + 诊断，一次性返回 JSON |
-| `/diagnose/stream` | GET | SSE 流式诊断，逐 token 返回 |
+| `/diagnose/stream` | GET / POST | SSE 流式诊断，逐 token 返回 |
 | `/stats` | GET | 运行时度量：请求量 / 耗时 / token 用量 / 估算成本 / 缓存命中率 |
 | `/stats/reset` | POST | 清零统计与缓存（用于做对照实验） |
+
+> ⚠️ **带文本参数的接口请优先用 POST。** GET 版把日志放在 query string 里，
+> 实测长度上限约 **32K 字符**，再长会被 ASGI 服务器直接以 400 拒绝 ——
+> 而「日志很长」恰恰是上下文聚合最有价值的场景。POST 版用 JSON body 传，没有这个限制。
+> 前端已经统一改用 POST。
 
 `/diagnose` 的响应里带一个 `context` 字段，说明这次实际送了哪些日志给模型：
 
@@ -390,10 +396,12 @@ LogWise/
 │   ├── test_context.py      # 上下文聚合逻辑测试
 │   ├── test_guard.py        # 鉴权 / 限流 / 缓存 / 度量测试
 │   ├── test_prompts.py      # Prompt 结构校验（示例 JSON 合法性、字段完整性）
-│   └── test_eval_dataset.py # 评测集自身的结构校验
+│   ├── test_eval_dataset.py # 评测集自身的结构校验
+│   └── test_api.py          # HTTP 接口层测试（含「长日志必须走 POST」的回归）
 ├── k8s/                 # Deployment / Service / HPA
 ├── demo_parse.py        # 演示：日志解析
 ├── demo_diagnose.py     # 演示：调用 LLM 诊断
+├── demo_context.py      # 演示：上下文聚合带来的差别（新旧对比）
 ├── eval_hdfs.py         # 解析器评测（Loghub HDFS_2k）
 ├── eval_diagnosis.py    # 诊断质量评测（准确率 / 幻觉 / 置信度校准 / 成本）
 ├── Dockerfile
