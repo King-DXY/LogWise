@@ -1,0 +1,558 @@
+{
+  "description": "LogWise 诊断质量评测集。每条包含一段日志与人工标注的期望错误类型关键词。",
+  "scoring": {
+    "hit_rule": "预测的 error_type 或 root_cause 中包含 keywords 里的任意一个（不区分大小写）即算命中",
+    "note": "keywords 故意设置得比较宽松，只考察是否抓对了故障类别，不苛求措辞一致"
+  },
+  "cases": [
+    {
+      "id": "res-01",
+      "category": "资源耗尽",
+      "expected": "磁盘空间不足",
+      "keywords": ["磁盘", "空间", "disk", "No space"],
+      "log_lines": [
+        "2026-08-03 11:22:41,308 ERROR [metrics-writer] com.example.metrics.MetricsWriter - 指标落盘失败",
+        "java.io.IOException: No space left on device",
+        "\tat java.base/java.io.FileOutputStream.writeBytes(Native Method)",
+        "\tat com.example.metrics.MetricsWriter.flush(MetricsWriter.java:64)",
+        "\tat com.example.metrics.MetricsScheduler.run(MetricsScheduler.java:31)"
+      ]
+    },
+    {
+      "id": "res-02",
+      "category": "资源耗尽",
+      "expected": "JVM 堆内存溢出",
+      "keywords": ["内存", "堆", "OutOfMemory", "heap"],
+      "log_lines": [
+        "2026-08-04 02:15:09,776 ERROR [scheduler-2] com.example.batch.BatchProcessor - 批量任务中断",
+        "java.lang.OutOfMemoryError: Java heap space",
+        "\tat com.example.batch.BatchProcessor.loadAll(BatchProcessor.java:132)",
+        "\tat com.example.batch.BatchJob.run(BatchJob.java:61)"
+      ]
+    },
+    {
+      "id": "res-03",
+      "category": "资源耗尽",
+      "expected": "文件句柄耗尽",
+      "keywords": ["句柄", "描述符", "Too many open files", "打开文件"],
+      "log_lines": [
+        "2026-08-05 09:41:22,105 ERROR [http-nio-8080-exec-5] com.example.file.FileService - 读取文件失败",
+        "java.io.FileNotFoundException: /data/upload/tmp/8821.part (Too many open files)",
+        "\tat java.base/java.io.FileInputStream.open0(Native Method)",
+        "\tat com.example.file.FileService.read(FileService.java:48)"
+      ]
+    },
+    {
+      "id": "res-04",
+      "category": "资源耗尽",
+      "expected": "线程池队列打满触发拒绝策略",
+      "keywords": ["线程池", "队列", "拒绝", "Rejected"],
+      "log_lines": [
+        "2026-08-06 14:03:55,412 ERROR [http-nio-8080-exec-9] com.example.job.JobController - 提交任务失败",
+        "java.util.concurrent.RejectedExecutionException: Task FutureTask@4f2a1c rejected from ThreadPoolExecutor@1b6d7a[Running, pool size = 200, active threads = 200, queued tasks = 1000, completed tasks = 48213]",
+        "\tat java.base/java.util.concurrent.ThreadPoolExecutor$AbortPolicy.rejectedExecution(ThreadPoolExecutor.java:2063)",
+        "\tat com.example.job.JobController.submit(JobController.java:71)"
+      ]
+    },
+    {
+      "id": "dep-01",
+      "category": "依赖服务",
+      "expected": "数据库连接数达到上限",
+      "keywords": ["Too many connections", "连接数", "连接上限"],
+      "log_lines": [
+        "2026-08-07 10:18:33,901 ERROR [http-nio-8080-exec-3] com.example.user.UserRepository - 查询用户失败",
+        "java.sql.SQLNonTransientConnectionException: Data source rejected establishment of connection, message from server: \"Too many connections\"",
+        "\tat com.mysql.cj.jdbc.exceptions.SQLError.createSQLException(SQLError.java:110)",
+        "\tat com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:186)",
+        "\tat com.example.user.UserRepository.findById(UserRepository.java:34)"
+      ]
+    },
+    {
+      "id": "dep-02",
+      "category": "依赖服务",
+      "expected": "Kafka 消费组重平衡失败",
+      "keywords": ["rebalance", "重平衡", "消费组"],
+      "log_lines": [
+        "2026-08-08 16:55:12,660 WARN [order-consumer-1] org.apache.kafka.clients.consumer.internals.ConsumerCoordinator - Rebalance failed",
+        "2026-08-08 16:55:14,003 ERROR [order-consumer-1] com.example.order.OrderConsumer - 消费消息异常",
+        "org.apache.kafka.common.errors.RebalanceInProgressException: Cannot attempt to complete rebalance because group is rebalancing",
+        "\tat org.apache.kafka.clients.consumer.internals.ConsumerCoordinator.poll(ConsumerCoordinator.java:512)",
+        "\tat com.example.order.OrderConsumer.consume(OrderConsumer.java:57)"
+      ]
+    },
+    {
+      "id": "dep-03",
+      "category": "依赖服务",
+      "expected": "消息队列 broker 强制断开连接",
+      "keywords": ["RabbitMQ", "broker", "消息队列", "CONNECTION_FORCED"],
+      "log_lines": [
+        "2026-08-09 08:30:44,219 ERROR [amqp-client-heartbeat] com.example.mq.MessagePublisher - 消息发送失败",
+        "com.rabbitmq.client.ShutdownSignalException: connection error; protocol method: #method<connection.close>(reply-code=320, reply-text=CONNECTION_FORCED - broker forced connection closure with reason 'shutdown')",
+        "\tat com.rabbitmq.client.impl.AMQConnection.shutdown(AMQConnection.java:941)",
+        "\tat com.example.mq.MessagePublisher.publish(MessagePublisher.java:63)"
+      ]
+    },
+    {
+      "id": "dep-04",
+      "category": "依赖服务",
+      "expected": "上游依赖服务不可用返回 503",
+      "keywords": ["503", "上游", "依赖服务", "不可用"],
+      "log_lines": [
+        "2026-08-10 13:07:19,552 ERROR [http-nio-8080-exec-2] com.example.inventory.InventoryClient - 调用库存服务失败",
+        "org.springframework.web.client.HttpServerErrorException$ServiceUnavailable: 503 Service Unavailable",
+        "\tat org.springframework.web.client.DefaultResponseErrorHandler.handleError(DefaultResponseErrorHandler.java:126)",
+        "\tat com.example.inventory.InventoryClient.getStock(InventoryClient.java:52)"
+      ]
+    },
+    {
+      "id": "bug-01",
+      "category": "代码缺陷",
+      "expected": "数组下标越界",
+      "keywords": ["越界", "数组", "ArrayIndexOutOfBounds"],
+      "log_lines": [
+        "2026-08-11 11:45:02,338 ERROR [http-nio-8080-exec-7] com.example.report.ReportParser - 解析报表失败",
+        "java.lang.ArrayIndexOutOfBoundsException: Index 12 out of bounds for length 10",
+        "\tat com.example.report.ReportParser.parseRow(ReportParser.java:88)",
+        "\tat com.example.report.ReportService.load(ReportService.java:41)"
+      ]
+    },
+    {
+      "id": "bug-02",
+      "category": "代码缺陷",
+      "expected": "类型强制转换失败",
+      "keywords": ["类型", "转换", "ClassCast"],
+      "log_lines": [
+        "2026-08-12 15:20:41,900 ERROR [http-nio-8080-exec-4] com.example.config.ConfigLoader - 加载配置失败",
+        "java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Integer",
+        "\tat com.example.config.ConfigLoader.readTimeout(ConfigLoader.java:73)",
+        "\tat com.example.config.ConfigLoader.load(ConfigLoader.java:29)"
+      ]
+    },
+    {
+      "id": "bug-03",
+      "category": "代码缺陷",
+      "expected": "多线程死锁",
+      "keywords": ["死锁", "deadlock"],
+      "log_lines": [
+        "2026-08-13 20:12:05,771 ERROR [http-nio-8080-exec-6] com.example.order.OrderService - 订单处理超时",
+        "java.lang.IllegalMonitorStateException: Found one Java-level deadlock:",
+        "  \"Thread-14\": waiting to lock monitor 0x00007f8c1c0a5b00 (a com.example.order.Order), which is held by \"Thread-15\"",
+        "  \"Thread-15\": waiting to lock monitor 0x00007f8c1c0a6a00 (a com.example.stock.Stock), which is held by \"Thread-14\"",
+        "\tat com.example.order.OrderService.transfer(OrderService.java:104)"
+      ]
+    },
+    {
+      "id": "bug-04",
+      "category": "代码缺陷",
+      "expected": "空指针异常（未判空）",
+      "keywords": ["空指针", "NullPointer", "判空", "null"],
+      "log_lines": [
+        "2026-08-14 09:55:18,446 ERROR [batch-worker-3] com.example.sync.DataSyncTask - 同步失败",
+        "java.lang.NullPointerException: Cannot invoke \"String.trim()\" because the return value of \"java.util.Map.get(Object)\" is null",
+        "\tat com.example.sync.DataSyncTask.normalize(DataSyncTask.java:96)",
+        "\tat com.example.sync.DataSyncTask.run(DataSyncTask.java:52)"
+      ]
+    },
+    {
+      "id": "cfg-01",
+      "category": "配置问题",
+      "expected": "HTTPS 证书过期或校验失败",
+      "keywords": ["证书", "certificate", "SSL", "PKIX"],
+      "log_lines": [
+        "2026-08-15 07:00:03,120 ERROR [http-nio-8080-exec-1] com.example.pay.PayClient - 调用支付网关失败",
+        "javax.net.ssl.SSLHandshakeException: PKIX path validation failed: java.security.cert.CertPathValidatorException: validity check failed",
+        "\tat java.base/sun.security.ssl.Alert.createSSLException(Alert.java:131)",
+        "\tat com.example.pay.PayClient.post(PayClient.java:74)"
+      ]
+    },
+    {
+      "id": "cfg-02",
+      "category": "配置问题",
+      "expected": "监听端口已被占用",
+      "keywords": ["端口", "占用", "Address already in use", "BindException"],
+      "log_lines": [
+        "2026-08-16 08:00:00,512 ERROR [main] com.example.Application - 应用启动失败",
+        "java.net.BindException: Address already in use: bind",
+        "\tat java.base/sun.nio.ch.Net.bind0(Native Method)",
+        "\tat org.springframework.boot.web.embedded.tomcat.TomcatWebServer.start(TomcatWebServer.java:220)"
+      ]
+    },
+    {
+      "id": "cfg-03",
+      "category": "配置问题",
+      "expected": "配置项类型不合法导致绑定失败",
+      "keywords": ["配置", "NumberFormat", "绑定", "格式"],
+      "log_lines": [
+        "2026-08-17 08:00:01,887 ERROR [main] com.example.Application - 应用启动失败",
+        "java.lang.IllegalStateException: Failed to bind properties under 'app.retry.max-attempts' to int",
+        "Caused by: java.lang.NumberFormatException: For input string: \"three\"",
+        "\tat java.base/java.lang.Integer.parseInt(Integer.java:652)"
+      ]
+    },
+    {
+      "id": "net-01",
+      "category": "网络问题",
+      "expected": "域名解析失败",
+      "keywords": ["DNS", "解析", "UnknownHost", "域名", "主机名"],
+      "log_lines": [
+        "2026-08-18 12:33:27,004 ERROR [http-nio-8080-exec-8] com.example.notify.SmsClient - 发送短信失败",
+        "java.net.UnknownHostException: sms-gateway.internal",
+        "\tat java.base/java.net.InetAddress.getAllByName0(Native Method)",
+        "\tat com.example.notify.SmsClient.send(SmsClient.java:39)"
+      ]
+    },
+    {
+      "id": "net-02",
+      "category": "网络问题",
+      "expected": "TCP 连接被对端重置",
+      "keywords": ["重置", "reset", "连接中断", "Connection reset"],
+      "log_lines": [
+        "2026-08-19 18:44:51,233 ERROR [http-nio-8080-exec-2] com.example.upstream.UpstreamClient - 请求上游失败",
+        "java.net.SocketException: Connection reset by peer",
+        "\tat java.base/sun.nio.ch.SocketDispatcher.read0(Native Method)",
+        "\tat com.example.upstream.UpstreamClient.get(UpstreamClient.java:66)"
+      ]
+    },
+    {
+      "id": "net-03",
+      "category": "网络问题",
+      "expected": "上游响应过慢导致读超时",
+      "keywords": ["超时", "timeout", "响应慢", "上游"],
+      "log_lines": [
+        "2026-08-20 21:10:09,668 WARN [http-nio-8080-exec-3] com.example.upstream.UpstreamClient - 请求耗时 4820ms，接近超时阈值",
+        "2026-08-20 21:10:12,115 ERROR [http-nio-8080-exec-3] com.example.order.OrderFacade - 下单失败",
+        "java.net.SocketTimeoutException: Read timed out",
+        "\tat okhttp3.internal.http2.Http2Stream.waitForIo(Http2Stream.java:627)",
+        "\tat com.example.upstream.UpstreamClient.get(UpstreamClient.java:71)",
+        "\tat com.example.order.OrderFacade.create(OrderFacade.java:58)"
+      ]
+    },
+    {
+      "id": "os-01",
+      "category": "环境与数据",
+      "expected": "文件系统权限不足",
+      "keywords": ["权限", "Permission denied", "无权"],
+      "log_lines": [
+        "2026-08-21 10:02:44,190 ERROR [batch-worker-1] com.example.backup.BackupTask - 备份失败",
+        "java.io.FileNotFoundException: /var/backup/db-20260821.sql.gz (Permission denied)",
+        "\tat java.base/java.io.FileOutputStream.open0(Native Method)",
+        "\tat com.example.backup.BackupTask.write(BackupTask.java:83)"
+      ]
+    },
+    {
+      "id": "os-02",
+      "category": "环境与数据",
+      "expected": "唯一键冲突（数据重复）",
+      "keywords": ["唯一", "重复", "Duplicate", "约束"],
+      "log_lines": [
+        "2026-08-22 11:26:37,541 ERROR [http-nio-8080-exec-5] com.example.user.UserService - 注册失败",
+        "org.springframework.dao.DuplicateKeyException: PreparedStatementCallback; SQL [INSERT INTO t_user(phone, name) VALUES (?, ?)]; Duplicate entry '13800138000' for key 'uk_phone'",
+        "\tat org.springframework.jdbc.support.SQLErrorCodeSQLExceptionTranslator.doTranslate(SQLErrorCodeSQLExceptionTranslator.java:242)",
+        "\tat com.example.user.UserService.register(UserService.java:47)"
+      ]
+    },
+    {
+      "id": "tricky-01",
+      "difficulty": "tricky",
+      "category": "根因辨析",
+      "expected": "数据库进入只读模式（主从切换），不是数据本身违规",
+      "keywords": ["只读", "read-only", "主从", "故障转移", "从库"],
+      "log_lines": [
+        "2026-09-01 14:22:08,331 ERROR [http-nio-8080-exec-4] com.example.order.OrderRepository - 订单写入失败",
+        "org.springframework.dao.DataIntegrityViolationException: could not execute statement",
+        "\tat org.springframework.orm.jpa.vendor.HibernateJpaDialect.translateExceptionIfPossible(HibernateJpaDialect.java:278)",
+        "\tat com.example.order.OrderRepository.save(OrderRepository.java:52)",
+        "Caused by: java.sql.SQLException: The MySQL server is running with the --read-only option so it cannot execute this statement",
+        "\tat com.mysql.cj.jdbc.exceptions.SQLError.createSQLException(SQLError.java:130)"
+      ]
+    },
+    {
+      "id": "tricky-02",
+      "difficulty": "tricky",
+      "category": "根因辨析",
+      "expected": "数据库死锁，而非普通的加锁失败",
+      "keywords": ["死锁", "deadlock"],
+      "log_lines": [
+        "2026-09-03 10:05:31,772 ERROR [http-nio-8080-exec-1] com.example.stock.StockService - 扣减库存失败",
+        "org.springframework.dao.CannotAcquireLockException: could not execute statement",
+        "\tat com.example.stock.StockService.deduct(StockService.java:61)",
+        "Caused by: java.sql.SQLTransactionRollbackException: Deadlock found when trying to get lock; try restarting transaction",
+        "\tat com.mysql.cj.jdbc.exceptions.SQLError.createSQLException(SQLError.java:107)"
+      ]
+    },
+    {
+      "id": "tricky-03",
+      "difficulty": "tricky",
+      "category": "根因辨析",
+      "expected": "递归缺少终止条件导致无限递归，而非单纯的堆不够用",
+      "keywords": ["递归", "终止条件", "死循环", "无限", "重复调用"],
+      "log_lines": [
+        "2026-09-04 08:17:52,090 ERROR [worker-2] com.example.tree.TreeWalker - 遍历组织树失败",
+        "java.lang.OutOfMemoryError: Java heap space",
+        "\tat com.example.tree.TreeWalker.walk(TreeWalker.java:41)",
+        "\tat com.example.tree.TreeWalker.walk(TreeWalker.java:44)",
+        "\tat com.example.tree.TreeWalker.walk(TreeWalker.java:44)",
+        "\tat com.example.tree.TreeWalker.walk(TreeWalker.java:44)"
+      ]
+    },
+    {
+      "id": "tricky-04",
+      "difficulty": "tricky",
+      "category": "根因辨析",
+      "expected": "应用上下文已关闭，通常发生在停机或重启过程中",
+      "keywords": ["关闭", "停机", "重启", "上下文", "ApplicationContext", "优雅退出"],
+      "log_lines": [
+        "2026-09-05 22:10:03,441 ERROR [http-nio-8080-exec-6] com.example.notify.PushService - 推送失败",
+        "java.lang.IllegalStateException: The ApplicationContext has been closed already",
+        "\tat com.example.notify.PushService.send(PushService.java:55)",
+        "\tat com.example.notify.NotifyController.push(NotifyController.java:31)"
+      ]
+    },
+    {
+      "id": "vague-01",
+      "difficulty": "vague",
+      "expect_low_confidence": true,
+      "confidence_threshold": 0.7,
+      "category": "信息不足",
+      "expected": "只有一行日志，无堆栈无上下文，应当承认信息不足并给低置信度",
+      "keywords": [],
+      "log_lines": [
+        "2026-09-06 04:00:00,001 ERROR [task-1] com.example.job.NightlyJob - 夜间任务执行失败"
+      ]
+    },
+    {
+      "id": "vague-02",
+      "difficulty": "vague",
+      "expect_low_confidence": true,
+      "confidence_threshold": 0.7,
+      "category": "信息不足",
+      "expected": "堆栈被截断，看不到真正抛出点，应给低置信度",
+      "keywords": [],
+      "log_lines": [
+        "2026-09-07 11:30:22,556 ERROR [http-nio-8080-exec-1] com.example.api.ApiController - 请求处理失败",
+        "java.lang.RuntimeException: 处理失败",
+        "\tat com.example.api.ApiController.handle(ApiController.java:88)",
+        "\t... 52 more"
+      ]
+    },
+    {
+      "id": "vague-03",
+      "difficulty": "vague",
+      "expect_low_confidence": true,
+      "confidence_threshold": 0.7,
+      "category": "信息不足",
+      "expected": "只说了超时，没有任何线索指向哪个环节，应给低置信度",
+      "keywords": [],
+      "log_lines": [
+        "2026-09-08 16:45:00,900 ERROR [scheduler] com.example.sync.SyncJob - 同步超时",
+        "java.util.concurrent.TimeoutException",
+        "\tat com.example.sync.SyncJob.await(SyncJob.java:120)"
+      ]
+    },
+    {
+      "id": "vague-04",
+      "difficulty": "vague",
+      "expect_low_confidence": true,
+      "confidence_threshold": 0.7,
+      "category": "信息不足",
+      "expected": "第三方返回自定义错误码，日志中无从得知含义，应给低置信度",
+      "keywords": [],
+      "log_lines": [
+        "2026-09-09 09:15:33,204 ERROR [http-nio-8080-exec-3] com.example.pay.PayService - 支付处理异常",
+        "com.example.pay.PayException: 支付网关返回未知错误码 [code=9F27]",
+        "\tat com.example.pay.PayService.handle(PayService.java:102)"
+      ]
+    },
+    {
+      "id": "multi-01",
+      "difficulty": "multi",
+      "category": "多日志连锁",
+      "expected": "Pod 因节点内存压力被驱逐（真因在 WARN 行，第一条 ERROR 只看到连接被拒）",
+      "keywords": ["驱逐", "Evicted", "内存压力", "节点内存", "low on resource"],
+      "log_lines": [
+        "2026-09-10 23:15:01,220 WARN  [node-agent] kubelet - Pod order-service-7f9c4d 被驱逐：The node was low on resource: memory. Threshold quantity: 100Mi",
+        "2026-09-10 23:15:04,881 ERROR [api-gateway] com.example.gateway.OrderClient - 调用订单服务失败: connection refused",
+        "\tat com.example.gateway.OrderClient.post(OrderClient.java:47)",
+        "\tat com.example.gateway.RouteHandler.dispatch(RouteHandler.java:88)",
+        "2026-09-10 23:15:06,102 ERROR [web] com.example.web.OrderController - 下单失败: 订单服务不可用"
+      ]
+    },
+    {
+      "id": "multi-02",
+      "difficulty": "multi",
+      "category": "多日志连锁",
+      "expected": "未走索引的慢查询占满连接池（第一条 ERROR 只看到连接池取不到连接）",
+      "keywords": ["慢查询", "索引", "慢 SQL", "慢sql", "全表扫描"],
+      "log_lines": [
+        "2026-09-11 10:02:11,004 WARN  [db-monitor] com.example.monitor.SlowQueryLogger - 检测到慢查询 12.4s: SELECT * FROM t_order WHERE status = ?",
+        "2026-09-11 10:02:15,660 WARN  [db-monitor] com.example.monitor.SlowQueryLogger - 检测到慢查询 11.8s: SELECT * FROM t_order WHERE status = ?",
+        "2026-09-11 10:02:31,220 ERROR [http-nio-8080-exec-4] com.zaxxer.hikari.pool.HikariPool - Connection is not available, request timed out after 30000ms",
+        "\tat com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:197)",
+        "2026-09-11 10:02:31,225 ERROR [http-nio-8080-exec-4] com.example.order.OrderService - 查询订单列表失败"
+      ]
+    },
+    {
+      "id": "multi-03",
+      "difficulty": "multi",
+      "category": "多日志连锁",
+      "expected": "证书自动续期任务失败导致证书过期（第一条 ERROR 只看到 TLS 握手失败）",
+      "keywords": ["续期", "续签", "ACME", "自动续", "renew"],
+      "log_lines": [
+        "2026-09-12 06:00:02,331 WARN  [cert-renew] com.example.cert.CertRenewJob - 证书续期失败: ACME challenge 校验超时，当前证书将于 3 天后过期",
+        "2026-09-12 09:14:55,702 ERROR [http-nio-8080-exec-2] com.example.pay.PayClient - 调用支付网关失败",
+        "javax.net.ssl.SSLHandshakeException: PKIX path validation failed: java.security.cert.CertPathValidatorException: validity check failed",
+        "\tat com.example.pay.PayClient.post(PayClient.java:74)",
+        "2026-09-12 09:14:55,710 ERROR [http-nio-8080-exec-2] com.example.order.OrderService - 下单失败: 支付通道不可用"
+      ]
+    },
+    {
+      "id": "multi-04",
+      "difficulty": "multi",
+      "category": "多日志连锁",
+      "expected": "上游服务发版做了接口重构（真因在 INFO 行，第一条 ERROR 只看到 404）",
+      "keywords": ["发布", "发版", "升级", "接口重构", "不兼容", "v3.0.0"],
+      "log_lines": [
+        "2026-09-13 14:00:03,110 INFO  [deploy] com.example.deploy.ReleaseNotifier - 会员服务发布完成，版本 v2.4.0 -> v3.0.0（含接口重构）",
+        "2026-09-13 14:05:41,772 ERROR [http-nio-8080-exec-8] com.example.gateway.MemberClient - 调用会员服务失败",
+        "org.springframework.web.client.HttpClientErrorException$NotFound: 404 Not Found",
+        "\tat com.example.gateway.MemberClient.get(MemberClient.java:63)",
+        "2026-09-13 14:05:41,780 ERROR [http-nio-8080-exec-8] com.example.gateway.UserProfileHandler - 获取用户资料失败，对外返回 500"
+      ]
+    },
+    {
+      "id": "multi-05",
+      "difficulty": "multi",
+      "category": "多日志连锁",
+      "expected": "本地磁盘写满导致 API 大面积 503（真因在最后的 WARN）",
+      "keywords": ["磁盘", "空间", "使用率", "No space", "/data"],
+      "log_lines": [
+        "2026-09-14 03:20:11,220 ERROR [api] com.example.api.ApiController - 请求处理失败: 503 Service Unavailable",
+        "\tat com.example.api.ApiController.handle(ApiController.java:88)",
+        "2026-09-14 03:20:11,225 ERROR [api] com.example.api.HealthChecker - 本地磁盘缓存子系统不可用",
+        "2026-09-14 03:20:11,230 WARN  [disk-monitor] com.example.monitor.DiskMonitor - /data 分区使用率 99.2%，剩余 48MB"
+      ]
+    },
+    {
+      "id": "multi-06",
+      "difficulty": "multi",
+      "category": "多日志连锁",
+      "expected": "MySQL 主从切换导致连接中断（第一条 ERROR 只看到连接池超时）",
+      "keywords": ["主从", "切换", "故障转移", "failover", "master"],
+      "log_lines": [
+        "2026-09-15 02:11:03,441 ERROR [http-nio-8080-exec-1] com.example.dao.OrderDao - 查询订单失败",
+        "java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 30000ms",
+        "\tat com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:197)",
+        "2026-09-15 02:11:05,002 WARN  [db-proxy] com.example.db.ProxyHealth - MySQL 主库 mysql-master-0 不可达，已触发主从切换，切换期间连接全部中断",
+        "2026-09-15 02:11:20,113 INFO  [db-proxy] com.example.db.ProxyHealth - 主从切换完成，新主库 mysql-master-1 已就绪"
+      ]
+    },
+    {
+      "id": "noise-01",
+      "difficulty": "noise",
+      "category": "长日志噪音",
+      "expected": "真因是 4 条之外的 INFO（动态配置推送把权限模式改成了 strict）—— 考验窗口 K 是否够大",
+      "keywords": ["动态配置", "配置推送", "配置中心", "ConfigListener", "推送变更"],
+      "log_lines": [
+        "2026-09-20 10:00:00,100 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-20 10:00:01,200 INFO  [metrics] com.example.metrics.Reporter - 指标上报成功",
+        "2026-09-20 10:00:02,300 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-20 10:00:03,410 ERROR [api] com.example.user.UserController - 用户查询接口失败",
+        "java.lang.IllegalStateException: 未知的权限模式: strict",
+        "\tat com.example.user.PrivilegeFilter.apply(PrivilegeFilter.java:41)",
+        "\tat com.example.user.UserController.query(UserController.java:72)",
+        "2026-09-20 10:00:04,500 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-20 10:00:05,600 INFO  [metrics] com.example.metrics.Reporter - 指标上报成功",
+        "2026-09-20 10:00:06,700 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-20 10:00:07,800 INFO  [config] com.example.config.ConfigListener - 动态配置推送: user.privilege.mode = strict",
+        "2026-09-20 10:00:08,900 INFO  [health] com.example.health.HealthChecker - 健康检查通过"
+      ]
+    },
+    {
+      "id": "noise-02",
+      "difficulty": "noise",
+      "category": "长日志噪音",
+      "expected": "真因是 6 条之外的 INFO（风控服务灰度发布改了接口路径）—— 窗口 K 要 ≥6 才看得到",
+      "keywords": ["灰度", "灰度发布", "发版", "接口变更", "v2"],
+      "log_lines": [
+        "2026-09-21 00:00:00,100 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-21 00:00:01,200 INFO  [metrics] com.example.metrics.Reporter - 指标上报成功",
+        "2026-09-21 00:00:02,300 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-21 00:00:03,400 INFO  [metrics] com.example.metrics.Reporter - 指标上报成功",
+        "2026-09-21 00:00:04,500 ERROR [gateway] com.example.gateway.RiskClient - 调用风控服务失败: 404",
+        "\tat com.example.gateway.RiskClient.check(RiskClient.java:55)",
+        "\tat com.example.gateway.OrderRouteHandler.dispatch(OrderRouteHandler.java:91)",
+        "2026-09-21 00:00:05,600 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-21 00:00:06,700 INFO  [metrics] com.example.metrics.Reporter - 指标上报成功",
+        "2026-09-21 00:00:07,800 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-21 00:00:08,900 INFO  [metrics] com.example.metrics.Reporter - 指标上报成功",
+        "2026-09-21 00:00:09,000 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-21 00:00:10,100 INFO  [deploy] com.example.deploy.ReleaseNotifier - 风控服务灰度发布完成: /api/v1/risk/check 已下线，新接口 /api/v2/risk/evaluate",
+        "2026-09-21 00:00:11,200 INFO  [health] com.example.health.HealthChecker - 健康检查通过"
+      ]
+    },
+    {
+      "id": "noise-03",
+      "difficulty": "noise",
+      "category": "长日志噪音",
+      "expected": "真因 WARN 与锚点之间夹了 10 条无关告警 —— 上限 M 要 ≥12 才留得住真因",
+      "keywords": ["锁定", "文件锁", "积压", "外部进程", "StockStore"],
+      "log_lines": [
+        "2026-09-22 14:00:00,100 ERROR [order] com.example.order.StockClient - 下单失败: 库存服务响应异常",
+        "java.util.concurrent.TimeoutException: 等待库存服务响应超时 3000ms",
+        "\tat com.example.order.StockClient.deduct(StockClient.java:64)",
+        "\tat com.example.order.OrderService.create(OrderService.java:112)",
+        "2026-09-22 14:00:01,200 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 61%，低于阈值 80%",
+        "2026-09-22 14:00:02,300 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 58%，低于阈值 80%",
+        "2026-09-22 14:00:03,400 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 63%，低于阈值 80%",
+        "2026-09-22 14:00:04,500 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 57%，低于阈值 80%",
+        "2026-09-22 14:00:05,600 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 60%，低于阈值 80%",
+        "2026-09-22 14:00:06,700 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 55%，低于阈值 80%",
+        "2026-09-22 14:00:07,800 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 62%，低于阈值 80%",
+        "2026-09-22 14:00:08,900 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 59%，低于阈值 80%",
+        "2026-09-22 14:00:09,000 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 64%，低于阈值 80%",
+        "2026-09-22 14:00:10,100 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 56%，低于阈值 80%",
+        "2026-09-22 14:00:11,200 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-22 14:00:12,300 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-22 14:00:13,400 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-22 14:00:14,500 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-22 14:00:15,600 WARN  [stock] com.example.stock.StockStore - 库存数据文件被外部进程锁定，写入队列已积压 1240 条"
+      ]
+    },
+    {
+      "id": "noise-04",
+      "difficulty": "noise",
+      "category": "长日志噪音",
+      "expected": "真因 WARN 与前夹了 18 条无关告警 —— 只有上限 M ≥20 才留得住真因",
+      "keywords": ["锁定", "文件锁", "积压", "外部进程", "StockStore"],
+      "log_lines": [
+        "2026-09-23 09:00:00,100 ERROR [order] com.example.order.StockClient - 下单失败: 库存服务响应异常",
+        "java.util.concurrent.TimeoutException: 等待库存服务响应超时 3000ms",
+        "\tat com.example.order.StockClient.deduct(StockClient.java:64)",
+        "\tat com.example.order.OrderService.create(OrderService.java:112)",
+        "2026-09-23 09:00:01,200 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 61%，低于阈值 80%",
+        "2026-09-23 09:00:02,300 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 58%，低于阈值 80%",
+        "2026-09-23 09:00:03,400 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 63%，低于阈值 80%",
+        "2026-09-23 09:00:04,500 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 57%，低于阈值 80%",
+        "2026-09-23 09:00:05,600 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 60%，低于阈值 80%",
+        "2026-09-23 09:00:06,700 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 55%，低于阈值 80%",
+        "2026-09-23 09:00:07,800 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 62%，低于阈值 80%",
+        "2026-09-23 09:00:08,900 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 59%，低于阈值 80%",
+        "2026-09-23 09:00:09,000 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 64%，低于阈值 80%",
+        "2026-09-23 09:00:10,100 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 56%，低于阈值 80%",
+        "2026-09-23 09:00:11,200 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 61%，低于阈值 80%",
+        "2026-09-23 09:00:12,300 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 58%，低于阈值 80%",
+        "2026-09-23 09:00:13,400 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 63%，低于阈值 80%",
+        "2026-09-23 09:00:14,500 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 57%，低于阈值 80%",
+        "2026-09-23 09:00:15,600 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 60%，低于阈值 80%",
+        "2026-09-23 09:00:16,700 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 55%，低于阈值 80%",
+        "2026-09-23 09:00:17,800 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 62%，低于阈值 80%",
+        "2026-09-23 09:00:18,900 WARN  [cache] com.example.cache.CacheStats - 本地缓存命中率 59%，低于阈值 80%",
+        "2026-09-23 09:00:19,000 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-23 09:00:20,100 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-23 09:00:21,200 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-23 09:00:22,300 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
+        "2026-09-23 09:00:23,400 WARN  [stock] com.example.stock.StockStore - 库存数据文件被外部进程锁定，写入队列已积压 3860 条"
+      ]
+    }
+  ]
+}

@@ -237,6 +237,16 @@ def main() -> None:
     check_dependencies()
     check_env_file()
 
+    # 打印接口防护状态（延迟导入：万一依赖缺失，上面的检查已经给出友好提示了）
+    try:
+        from app.guard import startup_notice
+
+        print()
+        for line in startup_notice().splitlines():
+            print(f"  {line}")
+    except Exception:
+        pass
+
     port = pick_port(args.port)
     if port != args.port:
         print(f"  [注意] 端口 {args.port} 已被占用，自动改用 {port}")
