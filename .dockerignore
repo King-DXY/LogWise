@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.pytest_cache/
+tests/
+data/
+demo_parse.py
+demo_diagnose.py
+.git/

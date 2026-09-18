@@ -1,0 +1,13 @@
+services:
+  logwise:
+    build:
+      context: .
+      # 国内网络走清华镜像，避免直连官方 PyPI 超时。
+      # 海外环境可删掉下面两行，直接用 Dockerfile 里的官方源默认值。
+      args:
+        PIP_INDEX: https://pypi.tuna.tsinghua.edu.cn/simple
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    restart: unless-stopped

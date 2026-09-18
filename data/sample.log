@@ -1,0 +1,9 @@
+2025-09-14 10:23:45,123 INFO [http-nio-8080-exec-1] com.example.OrderService - 用户下单失败: 库存不足
+
+2025-09-14 10:23:46,789 ERROR [main] app.db - 连接数据库超时
+Traceback (most recent call last):
+  File "app/db.py", line 18, in insert
+    raise ConnectionError("connect timeout")
+ConnectionError: connect timeout
+
+2025-09-14 10:23:47,012 WARN [scheduler] app.job - 重试任务 3 次仍失败，稍后再次调度

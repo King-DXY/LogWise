@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LogWise 日志诊断助手</title>
+<style>
+  body { font-family: "Microsoft YaHei", system-ui, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; background: #f6f8fb; color: #0f172a; }
+  h1 { font-size: 22px; }
+  p { color: #475569; }
+  textarea { width: 100%; height: 180px; font-family: Consolas, monospace; font-size: 13px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; box-sizing: border-box; }
+  button { margin-top: 12px; padding: 10px 24px; font-size: 15px; background: #2563eb; color: #fff; border: none; border-radius: 8px; cursor: pointer; }
+  button:disabled { background: #94a3b8; cursor: not-allowed; }
+  .card { background: #fff; border-radius: 8px; padding: 16px; margin-top: 16px; border: 1px solid #e2e8f0; display: none; }
+  .card h3 { margin: 0 0 10px; font-size: 15px; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 13px; color: #334155; margin: 0; }
+  #diagResult { min-height: 120px; }
+</style>
+</head>
+<body>
+<h1>LogWise · LLM 日志诊断助手</h1>
+<p>粘贴一段日志，自动解析并调用大模型生成诊断（SSE 流式输出）。</p>
+<textarea id="logInput" placeholder="粘贴日志，例如：
+2025-09-14 10:23:46,789 ERROR [main] app.db - 连接数据库超时
+Traceback (most recent call last):
+  File &quot;app/db.py&quot;, line 18, in insert
+    raise ConnectionError(&quot;connect timeout&quot;)
+ConnectionError: connect timeout"></textarea>
+<br>
+<button id="btn" onclick="diagnose()">开始诊断</button>
+
+<div class="card" id="parseCard">
+  <h3>解析结果</h3>
+  <pre id="parseResult"></pre>
+</div>
+
+<div class="card" id="diagCard">
+  <h3>AI 诊断（流式）</h3>
+  <pre id="diagResult"></pre>
+</div>
+
+<script>
+async function diagnose() {
+  const text = document.getElementById("logInput").value.trim();
+  if (!text) return alert("请先粘贴日志");
+  const btn = document.getElementById("btn");
+  const parseRes = document.getElementById("parseResult");
+  const diagRes = document.getElementById("diagResult");
+  btn.disabled = true;
+  document.getElementById("parseCard").style.display = "block";
+  document.getElementById("diagCard").style.display = "block";
+  parseRes.textContent = "解析中...";
+  diagRes.textContent = "";
+
+  // 1) 解析接口
+  try {
+    const p = await fetch("/parse", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    const pj = await p.json();
+    parseRes.textContent = JSON.stringify(pj.logs, null, 2);
+  } catch (e) {
+    parseRes.textContent = "解析失败: " + e;
+  }
+
+  // 2) SSE 流式诊断接口
+  try {
+    const resp = await fetch("/diagnose/stream?text=" + encodeURIComponent(text));
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          const data = line.slice(6);
+          if (data === "[DONE]") continue;
+          try {
+            const token = JSON.parse(data);
+            diagRes.textContent += token;
+          } catch (e) { /* 忽略不完整的行 */ }
+        }
+      }
+    }
+  } catch (e) {
+    diagRes.textContent = "诊断失败: " + e;
+  }
+  btn.disabled = false;
+}
+</script>
+</body>
+</html>
