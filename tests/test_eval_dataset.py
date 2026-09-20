@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -190,3 +191,84 @@ class TestDefaultParamsCoverRootCause:
             checked += 1
 
         assert checked >= 8, f"只检查了 {checked} 条上下文类用例，覆盖不足"
+
+
+class TestNoLeakageFromFewShot:
+    """评测集不得与 Few-shot 示例「撞答案」。
+
+    为什么这条最要紧：Few-shot 示例是**每次请求都固定注入**的。
+    如果某条评测用例的正解与某个示例几乎一样，那这条用例就是开卷考 ——
+    分数虚高，而且会掩盖 Prompt 改动的真实差距。
+
+    实测教训（2026-09-20）：38 条用例里有 3 条踩了这个坑，形态是
+    「异常消息骨架与示例完全一致」，只有参数不同：
+
+        res-01 vs 示例2   IOException: No space left on device          ← 逐字相同
+        cfg-03 vs 示例4   IllegalStateException: Failed to bind properties under '?' to ?
+        bug-04 vs 示例3   NullPointerException（同类故障，措辞略有差异）
+
+    它们在历次评测里都是满分，但考的其实是「能否对照示例抄答案」。
+    修法：换成 Few-shot 未覆盖的故障类型
+    （磁盘配额超限 / YAML 语法错误 / 并发修改异常）。
+    """
+
+    MIN_LINE_LEN = 20
+
+    @staticmethod
+    def _exception_template(line: str) -> str | None:
+        """把异常行抽象成模板：抹掉具体取值，只留消息骨架。
+
+        IllegalStateException: Failed to bind properties under 'a.b' to int
+          → illegalstateexception: failed to bind properties under ? to T
+
+        这样「只有参数不同、骨架相同」的日志才会被判为撞车，
+        而「同类故障但措辞不同」不会误报。
+        """
+        m = re.search(r"([A-Za-z_.]*(?:Exception|Error|Throwable))\s*:\s*(.+)", line)
+        if not m:
+            return None
+        cls = m.group(1).split(".")[-1].lower()
+        msg = m.group(2).lower()
+        msg = re.sub(r"'[^']*'", "?", msg)
+        msg = re.sub(r'"[^"]*"', "?", msg)
+        msg = re.sub(r"\b\d+\b", "n", msg)
+        msg = re.sub(r"\b(?:[a-z_][a-z0-9_]*\.)+[a-z_][a-z0-9_]*\b", "T", msg)
+        msg = re.sub(r"\b(?:int|long|short|byte|char|boolean|float|double|string|object)\b", "T", msg)
+        msg = re.sub(r"\s+", " ", msg).strip()
+        return f"{cls}: {msg}"
+
+    @classmethod
+    def _templates(cls, lines: list[str]) -> set[str]:
+        return {t for t in (cls._exception_template(x) for x in lines) if t}
+
+    @staticmethod
+    def _few_shot_lines() -> list[str]:
+        from app.prompts import FEW_SHOT_EXAMPLES
+
+        lines: list[str] = []
+        for ex in FEW_SHOT_EXAMPLES:
+            lines.extend(ex["log"].split("\n"))
+        return lines
+
+    def test_no_identical_log_line(self, cases: list[dict]):
+        """没有任何一行日志与 Few-shot 示例逐字相同。"""
+        known = {re.sub(r"\s+", " ", x).strip().lower() for x in self._few_shot_lines()}
+        for c in cases:
+            for line in c["log_lines"]:
+                n = re.sub(r"\s+", " ", line).strip().lower()
+                if len(n) < self.MIN_LINE_LEN:
+                    continue
+                assert n not in known, (
+                    f"{c['id']} 有一行日志与 Few-shot 示例逐字相同：{n[:60]}。"
+                    "这等于开卷考，请换成示例未覆盖的故障类型。"
+                )
+
+    def test_no_shared_exception_template(self, cases: list[dict]):
+        """异常消息骨架不得与 Few-shot 示例撞车 —— 这是「能照抄答案」的实质信号。"""
+        known = self._templates(self._few_shot_lines())
+        for c in cases:
+            hit = self._templates(c["log_lines"]) & known
+            assert not hit, (
+                f"{c['id']} 的异常消息与 Few-shot 示例骨架相同：{sorted(hit)}。"
+                "模型可以直接套用示例的结论，请换一种故障类型。"
+            )

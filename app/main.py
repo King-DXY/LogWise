@@ -23,13 +23,14 @@ from pydantic import BaseModel
 
 from app import cache as cache_mod
 from app import context as context_mod
-from app import guard, metrics
+from app import guard, metrics, rag
 from app.context import LogContext, build_context, describe
 from app.diagnose import (
     PROMPT_VERSION,
     Usage,
     current_model,
     diagnose_multi_ex,
+    format_logs,
     prompt_char_size,
     stream_diagnosis_multi,
 )
@@ -97,6 +98,7 @@ def stats():
             "max_logs": context_mod.context_max_logs(),
             "note": "决定把哪些日志送给模型；参数已纳入缓存键",
         },
+        "rag": rag.describe(),
         "metrics": metrics.store.summary(),
         "cache": cache_mod.cache.snapshot(),
         "rate_limit": guard.limiter.snapshot(),
@@ -346,14 +348,24 @@ def _pick_target(logs: list[ParsedLog]) -> ParsedLog:
 def _cache_key(text: str, context: LogContext | None = None) -> str:
     """生成缓存键。
 
-    带上模型名、Prompt 版本，以及**上下文聚合参数**：
-    换模型、改 Prompt、调聚合窗口，任何一项变化都会让旧缓存自动失效。
+    带上模型名、Prompt 版本、**上下文聚合参数**，以及**检索结果指纹**：
+    换模型、改 Prompt、调聚合窗口、切换 RAG 模式或检索到不同案例，
+    任何一项变化都会让旧缓存自动失效。
+
+    检索结果指纹放的是「这次检索到了哪几条案例」而不是「配置是什么」——
+    因为知识库变了之后，同样的配置也会检索出不同案例。
     """
+    rag_signature = ""
+    if context is not None:
+        cases = rag.retrieve(format_logs(context.logs))
+        rag_signature = rag.signature(retrieved_ids=[c.id for c in cases])
+
     return cache_mod.make_key(
         text,
         model=current_model(),
         prompt_version=PROMPT_VERSION,
         context_signature=context.cache_signature() if context is not None else "",
+        rag_signature=rag_signature,
     )
 
 

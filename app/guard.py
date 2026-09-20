@@ -14,7 +14,7 @@
     因为限流的目的就是控制成本，本地调用同样在花钱。
 
 **全部用进程内存实现**
-    单实例够用。多副本部署时应换成 Redis（见 README「已知坑」）。
+    单实例够用。多副本部署时应换成 Redis（见 docs/PITFALLS.md）。
 """
 from __future__ import annotations
 

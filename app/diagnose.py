@@ -20,7 +20,9 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
 
 from app.parser import ParsedLog
-from app.prompts import FEW_SHOT_EXAMPLES, PROMPT_VERSION, SYSTEM_PROMPT
+# PROMPT_VERSION 在本模块内未直接使用，但 main / 评测脚本一直从这里取，
+# 保持这个再导出以免破坏既有调用方。
+from app.prompts import PROMPT_VERSION, SYSTEM_PROMPT  # noqa: F401
 
 # 显式指定 .env 路径，不依赖当前工作目录。override 默认 False，
 # 因此外部注入的环境变量（docker-compose env_file / K8s Secret）优先级更高。
@@ -115,7 +117,7 @@ def get_async_client() -> AsyncOpenAI:
 def format_logs(logs: list[ParsedLog]) -> str:
     """把多条日志格式化成给模型看的文本。
 
-    格式与 README「已量化的短板」章节里的天花板实验**完全一致**
+    格式与 docs/EXPERIMENTS.md 第 4.1 节「已量化的短板」里的天花板实验**完全一致**
     （那个实验达到 100% 命中），所以这里刻意不做改动。
     每条前面带 [序号]，级别单独成行 —— 让模型能分辨 WARN 和 ERROR，
     并利用时间线的先后顺序判断谁是根因、谁是后果。
@@ -134,21 +136,48 @@ def format_logs(logs: list[ParsedLog]) -> str:
     return "\n\n".join(blocks)
 
 
-def build_messages(logs: ParsedLog | list[ParsedLog]) -> list[dict]:
-    """组装 messages：system + few-shot 示例 + 本次日志。
+def build_messages(
+    logs: ParsedLog | list[ParsedLog],
+    mode: str | None = None,
+    top_k: int | None = None,
+    fixed_examples: list[dict] | None = None,
+) -> list[dict]:
+    """组装 messages：system + 示例 + 本次日志。
 
-    参数既可以是一条日志（保持向后兼容），也可以是由上下文聚合选出的一组日志。
+    参数
+    ----
+    logs
+        一条日志（保持向后兼容），或上下文聚合选出的一组日志。
+    mode
+        rag 模式（fixed / dynamic / hybrid）。None 时读环境变量，默认 fixed。
+    top_k
+        检索返回的案例数。
+    fixed_examples
+        覆盖固定的 Few-shot 示例 —— 评测脚本用 ``--from-git`` 拉历史 Prompt 时会传。
+
+    结构随模式变化::
+
+        fixed   → system + 固定示例 + 日志
+        dynamic → system + 参考资料说明 + 检索案例 + 日志
+        hybrid  → system + 参考资料说明 + 固定示例 + 检索案例 + 日志
     """
-    if isinstance(logs, ParsedLog):
-        log_list = [logs]
-    else:
-        log_list = list(logs)
+    from app import rag  # 函数内导入：rag → retriever → prompts 与本模块无循环，但保持依赖清晰
+
+    log_list = [logs] if isinstance(logs, ParsedLog) else list(logs)
+    text = format_logs(log_list)
+
+    examples, retrieved_ids = rag.build_examples(
+        text, mode=mode, k=top_k, fixed_examples=fixed_examples
+    )
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for ex in FEW_SHOT_EXAMPLES:
+    if retrieved_ids:
+        # 只在真的注入了检索案例时才加这段说明 —— 否则会与「固定示例仅示意格式」的约束打架
+        messages.append({"role": "system", "content": rag.RAG_NOTICE})
+    for ex in examples:
         messages.append({"role": "user", "content": ex["log"]})
         messages.append({"role": "assistant", "content": ex["diagnosis"]})
-    messages.append({"role": "user", "content": format_logs(log_list)})
+    messages.append({"role": "user", "content": text})
     return messages
 
 

@@ -191,28 +191,13 @@ def _reenter_venv() -> None:
     为什么需要这个：Windows 上直接运行 .py 文件时，可能用的是系统全局 Python，
     而依赖（fastapi / uvicorn）只装在项目的 .venv 里。这里自动切过去，
     这样「直接运行」和「在 .venv 里运行」效果完全一样。
+
+    实现在 ``app/launcher.py`` —— ``build_index.py`` 与 ``eval_retrieval.py``
+    也要用同一段逻辑，三处各写一份的话，以后改了一处另外两处会悄悄不一致。
     """
-    venv_dir = ROOT / ".venv"
-    venv_python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not venv_python.exists():
-        return  # 没有 .venv，就用当前解释器；后面的依赖检查会给出提示
+    from app.launcher import reenter_venv
 
-    try:
-        if Path(sys.prefix).resolve() == venv_dir.resolve():
-            return  # 已经在这个虚拟环境里了
-        if Path(sys.executable).resolve() == venv_python.resolve():
-            return
-    except Exception:
-        pass
-
-    print(f"  [切换] 正在切换到项目虚拟环境：{venv_python}")
-    import subprocess
-
-    completed = subprocess.run(
-        [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
-        cwd=str(ROOT),
-    )
-    sys.exit(completed.returncode)
+    reenter_venv()
 
 
 def main() -> None:

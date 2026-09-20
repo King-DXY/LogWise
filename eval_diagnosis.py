@@ -79,13 +79,38 @@ def load_prompts_from_git(ref: str) -> tuple[str, list, str]:
     )
 
 
-def build_messages(log_text: str, system: str, few_shot: list) -> list[dict]:
+def build_messages(
+    log_text: str,
+    system: str,
+    few_shot: list,
+    rag_mode: str | None = None,
+    rag_top_k: int | None = None,
+) -> tuple[list[dict], list[str]]:
+    """组装 messages，返回 (messages, 检索到的案例 id 列表)。
+
+    结构与 ``app.diagnose.build_messages`` 保持一致，这样评测测的就是线上真正跑的东西：
+
+        fixed   → system + 固定示例 + 日志
+        dynamic → system + 参考资料说明 + 检索案例 + 日志
+        hybrid  → system + 参考资料说明 + 固定示例 + 检索案例 + 日志
+
+    ``few_shot`` 由调用方传入（``--from-git`` 时会换成历史版本的示例），
+    所以这里不直接读 ``app.prompts``。
+    """
+    from app import rag
+
+    examples, retrieved_ids = rag.build_examples(
+        log_text, mode=rag_mode, k=rag_top_k, fixed_examples=few_shot
+    )
+
     messages = [{"role": "system", "content": system}]
-    for example in few_shot:
+    if retrieved_ids:
+        messages.append({"role": "system", "content": rag.RAG_NOTICE})
+    for example in examples:
         messages.append({"role": "user", "content": example["log"]})
         messages.append({"role": "assistant", "content": example["diagnosis"]})
     messages.append({"role": "user", "content": log_text})
-    return messages
+    return messages, retrieved_ids
 
 
 def log_to_text_with_context(logs: list) -> tuple[str, int]:
@@ -141,6 +166,14 @@ def main() -> None:
     parser.add_argument("--from-git", metavar="REF", help="从指定 git 版本加载 Prompt（如 HEAD）")
     parser.add_argument("--limit", type=int, default=0, help="只跑前 N 条")
     parser.add_argument("--json", metavar="PATH", help="把逐条明细导出为 JSON")
+    parser.add_argument(
+        "--rag-mode",
+        choices=["fixed", "dynamic", "hybrid"],
+        default=None,
+        help="注入策略：fixed=只用固定示例（基线）；dynamic=只用检索到的历史案例；"
+             "hybrid=固定示例 + 检索案例。不指定时沿用 .env 里的 LOGWISE_RAG_MODE",
+    )
+    parser.add_argument("--rag-top-k", type=int, default=3, help="检索注入的案例数（默认 3）")
     args = parser.parse_args()
 
     if args.from_git:
@@ -168,6 +201,17 @@ def main() -> None:
         print(f"  上下文聚合: 开启（窗口 ±{context_window()} 条，上限 {context_max_logs()} 条）")
     else:
         print("  上下文聚合: 关闭（只送锚点一条 —— 旧行为）")
+
+    from app import rag as rag_mod
+
+    effective_mode = args.rag_mode or rag_mod.rag_mode()
+    if effective_mode == "fixed":
+        print(f"  RAG 注入 : 关闭（只用固定 {len(few_shot)} 个示例 —— 基线）")
+    else:
+        kb_size = rag_mod.describe()["knowledge_base_size"]
+        print(f"  RAG 注入 : {effective_mode}"
+              f"（知识库 {kb_size} 条，检索 top-{args.rag_top_k} 注入）")
+
     print(f"  单价     : 缓存命中输入 {price_input_cached()} / 未命中输入 {price_input()} / 输出 {price_output()} 元每百万")
     print("=" * 78)
 
@@ -183,10 +227,13 @@ def main() -> None:
         t0 = time.perf_counter()
         raw = ""
         error = ""
+        messages, retrieved = build_messages(
+            body, system, few_shot, rag_mode=args.rag_mode, rag_top_k=args.rag_top_k
+        )
         try:
             resp = client.chat.completions.create(
                 model=model,
-                messages=build_messages(body, system, few_shot),
+                messages=messages,
                 temperature=0.2,
                 response_format={"type": "json_object"},
             )
@@ -242,6 +289,8 @@ def main() -> None:
             "evidence_total": len(evidence),
             "evidence_grounded": len(grounded),
             "context_logs": ctx_size,
+            "rag_injected": len(retrieved),
+            "rag_cases": retrieved,
             "prompt_tokens": usage.prompt_tokens,
             "cached_tokens": usage.cached_tokens,
             "completion_tokens": usage.completion_tokens,
@@ -363,6 +412,8 @@ def main() -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(
             json.dumps({"label": label, "summary": {
+                "rag_mode": effective_mode,
+                "rag_top_k": args.rag_top_k if effective_mode != "fixed" else 0,
                 "total": total,
                 "scored_cases": len(scored),
                 "hit_rate": hits / len(scored) if scored else None,

@@ -8,13 +8,14 @@
     {
       "id": "res-01",
       "category": "资源耗尽",
-      "expected": "磁盘空间不足",
-      "keywords": ["磁盘", "空间", "disk", "No space"],
+      "expected": "磁盘配额超限（用户写配额用尽，不是分区写满）",
+      "keywords": ["配额", "quota", "EDQUOT"],
       "log_lines": [
-        "2026-08-03 11:22:41,308 ERROR [metrics-writer] com.example.metrics.MetricsWriter - 指标落盘失败",
-        "java.io.IOException: No space left on device",
-        "\tat java.base/java.io.FileOutputStream.writeBytes(Native Method)",
-        "\tat com.example.metrics.MetricsWriter.flush(MetricsWriter.java:64)",
+        "2026-08-03 11:22:41,308 ERROR [metrics-writer] com.example.metrics.MetricsWriter - 日志文件滚动失败",
+        "java.io.IOException: Disk quota exceeded",
+        "\tat java.base/java.io.UnixFileSystem.createFileExclusively(Native Method)",
+        "\tat java.base/java.io.File.createNewFile(File.java:1035)",
+        "\tat com.example.metrics.MetricsWriter.rotate(MetricsWriter.java:88)",
         "\tat com.example.metrics.MetricsScheduler.run(MetricsScheduler.java:31)"
       ]
     },
@@ -144,12 +145,14 @@
     {
       "id": "bug-04",
       "category": "代码缺陷",
-      "expected": "空指针异常（未判空）",
-      "keywords": ["空指针", "NullPointer", "判空", "null"],
+      "expected": "遍历集合时并发修改（未使用迭代器安全删除）",
+      "keywords": ["并发修改", "ConcurrentModification", "迭代器", "遍历"],
       "log_lines": [
         "2026-08-14 09:55:18,446 ERROR [batch-worker-3] com.example.sync.DataSyncTask - 同步失败",
-        "java.lang.NullPointerException: Cannot invoke \"String.trim()\" because the return value of \"java.util.Map.get(Object)\" is null",
-        "\tat com.example.sync.DataSyncTask.normalize(DataSyncTask.java:96)",
+        "java.util.ConcurrentModificationException",
+        "\tat java.base/java.util.ArrayList$Itr.checkForComodification(ArrayList.java:1013)",
+        "\tat java.base/java.util.ArrayList$Itr.next(ArrayList.java:967)",
+        "\tat com.example.sync.DataSyncTask.removeExpired(DataSyncTask.java:96)",
         "\tat com.example.sync.DataSyncTask.run(DataSyncTask.java:52)"
       ]
     },
@@ -180,13 +183,14 @@
     {
       "id": "cfg-03",
       "category": "配置问题",
-      "expected": "配置项类型不合法导致绑定失败",
-      "keywords": ["配置", "NumberFormat", "绑定", "格式"],
+      "expected": "配置文件 YAML 语法错误（第 42 行缺少冒号）导致启动失败",
+      "keywords": ["YAML", "语法", "冒号", "配置文件", "解析"],
       "log_lines": [
-        "2026-08-17 08:00:01,887 ERROR [main] com.example.Application - 应用启动失败",
-        "java.lang.IllegalStateException: Failed to bind properties under 'app.retry.max-attempts' to int",
-        "Caused by: java.lang.NumberFormatException: For input string: \"three\"",
-        "\tat java.base/java.lang.Integer.parseInt(Integer.java:652)"
+        "2026-08-17 08:00:01,887 ERROR [main] com.example.Application - 加载配置文件失败",
+        "org.yaml.snakeyaml.scanner.ScannerException: while scanning a simple key at line 42, column 3: could not find expected ':'",
+        "\tat org.yaml.snakeyaml.scanner.ScannerImpl.fetchMoreTokens(ScannerImpl.java:430)",
+        "\tat org.yaml.snakeyaml.Yaml.loadFromReader(Yaml.java:481)",
+        "\tat com.example.Application.loadConfig(Application.java:58)"
       ]
     },
     {

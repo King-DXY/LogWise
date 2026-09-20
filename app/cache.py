@@ -79,15 +79,20 @@ def make_key(
     model: str = "",
     prompt_version: str = "",
     context_signature: str = "",
+    rag_signature: str = "",
 ) -> str:
     """生成缓存键。
 
     ``context_signature`` 是上下文聚合参数的签名（是否启用 / 窗口大小 / 条数上限）。
-    为什么要带上它：改了这些参数之后，同样的输入会产生不同的上下文包、进而产生
-    不同的诊断结论。不纳入缓存键的话，调参会以为「参数改了没效果」——
-    实际是命中了旧缓存。这是缓存类功能很容易踩的坑。
+    ``rag_signature`` 是检索配置与检索结果的指纹（模式 / top-k / 命中的案例 id）。
+
+    为什么要带上它们：改参数之后，同样的输入会产生不同的上下文包与不同的参考案例，
+    进而产生不同的诊断结论。不纳入缓存键的话，调参会以为「参数改了没效果」——
+    实际是命中了旧缓存。这是缓存类功能很容易踩的坑，
+    而且**在 RAG 上更隐蔽**：检索结果本身会随知识库变化，
+    所以指纹里放的是「检索到了哪几条」而不是「配置是什么」。
     """
-    payload = "\x00".join([model, prompt_version, context_signature, normalize(text)])
+    payload = "\x00".join([model, prompt_version, context_signature, rag_signature, normalize(text)])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
