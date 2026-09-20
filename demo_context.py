@@ -18,43 +18,23 @@
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+if __name__ == "__main__":
+    # ⚠️ 必须在导入任何项目模块**之前**切到 .venv ——
+    # 双击运行时用的是系统全局 Python，依赖只装在 .venv 里，
+    # 放到文件末尾调用就太晚了，import 阶段就会因找不到依赖而崩。
+    #
+    # 这里用 app.launcher 而不是各脚本各写一份：同一个逻辑写过三份之后
+    # 一定会漂移（比如那份拷贝就漏了 print 的 flush=True，
+    # 导致用户看到「按回车键关闭窗口」出现在「[切换] …」前面）。
+    from app.launcher import reenter_venv
 
-def _reenter_venv() -> None:
-    """确保用项目自带的 .venv 运行。
-
-    Windows 上双击 .py 用的是系统全局 Python，而 fastapi / openai 这些依赖
-    只装在项目的 .venv 里。这里自动切过去，让「双击」和「命令行」效果一致。
-    """
-    venv_dir = ROOT / ".venv"
-    venv_python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
-    if not venv_python.exists():
-        return
-    try:
-        if Path(sys.prefix).resolve() == venv_dir.resolve():
-            return
-        if Path(sys.executable).resolve() == venv_python.resolve():
-            return
-    except Exception:
-        pass
-
-    import subprocess
-
-    print(f"[切换] 正在切换到项目虚拟环境：{venv_python}")
-    completed = subprocess.run(
-        [str(venv_python), str(Path(__file__).resolve()), *sys.argv[1:]],
-        cwd=str(ROOT),
-    )
-    sys.exit(completed.returncode)
-
-
-_reenter_venv()
+    reenter_venv()
 
 from app.context import build_context, describe  # noqa: E402
 from app.diagnose import diagnose_multi_ex, format_logs  # noqa: E402
@@ -164,12 +144,10 @@ def _wrap(text: str, width: int) -> list[str]:
 
 
 if __name__ == "__main__":
+    from app.launcher import pause_if_console
+
     try:
         main()
     finally:
-        # 双击运行时窗口会一闪而过，留个停顿
-        if sys.stdin.isatty():
-            try:
-                input("按回车键关闭本窗口...")
-            except (EOFError, KeyboardInterrupt):
-                pass
+        # 双击运行时窗口会一闪而过，留个停顿（用共享实现，别各写一份）
+        pause_if_console()

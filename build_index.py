@@ -117,9 +117,8 @@ def main() -> int:
         print("  （不配也不影响诊断功能，只是 Dense / Hybrid 检索不可用）")
         return 1
 
-    if args.force and embedding.CACHE_PATH.exists():
-        embedding.CACHE_PATH.unlink()
-        embedding.reset_cache()
+    if args.force:
+        embedding.reset_cache(memory_only=False)
         print("  已清除向量缓存，将全量重建")
 
     print("=" * 74)
@@ -152,11 +151,51 @@ def main() -> int:
         except Exception as exc:
             print(f"  ❌ 调用失败: {type(exc).__name__}: {exc}")
             return 1
+        if len(all_vectors) != len(cases):
+            # 少算出来的向量会导致索引不完整，宁可失败也不要写半份索引
+            print(f"  ❌ 返回的向量数（{len(all_vectors)}）与案例数（{len(cases)}）不一致")
+            return 1
         elapsed = time.perf_counter() - t0
         print(f"  完成，耗时 {elapsed:.1f}s")
         vectors = {c["id"]: v for c, v in zip(cases, all_vectors)}
 
     dims = len(next(iter(vectors.values()))) if vectors else 0
+
+    # ------------------------------------------------------------------ #
+    # 与已有索引合并，而不是直接覆盖。
+    #
+    # 踩过的坑：`--limit N` 的 help 写的是"只处理前 N 条（用于小规模试跑）"，
+    # 但原来的写法是直接 write_text 覆盖 —— 于是跑一次 --limit 5 试跑，
+    # 就会把完整的 53 条索引变成 5 条，之后 dense 检索报"索引缺少 48 条"。
+    # 一个"只是想试试"的动作不该破坏已有数据。
+    # ------------------------------------------------------------------ #
+    existing = load_index()
+    old_vectors: dict = existing.get("vectors") or {}
+    old_model = existing.get("model")
+    old_dims = existing.get("dimensions")
+
+    if args.force:
+        old_vectors = {}          # --force = 明确弃用旧索引
+    elif old_vectors:
+        # 不同模型的向量空间不可比、不同维度无法点积 —— 都不能合并。
+        # 这里只提示并停下，让用户显式加 --force 再跑一次。
+        if old_model and old_model != embedding.embedding_model():
+            print(f"  ⚠️ 已有索引是用 {old_model} 建的，当前模型是 {embedding.embedding_model()}。")
+            print("     不同模型的向量不能混用。确认弃用旧索引重建，请加 --force 再跑一次。")
+            return 1
+        if old_dims and dims and old_dims != dims:
+            print(f"  ⚠️ 已有索引维度 {old_dims}，本次算出 {dims}，维度不同不能合并。")
+            print("     确认弃用旧索引重建，请加 --force 再跑一次。")
+            return 1
+        kept = len(old_vectors) - len(set(old_vectors) & set(vectors))
+        if kept > 0:
+            print(f"  合并已有索引：保留其余 {kept} 条案例的向量（本次只算了 {len(vectors)} 条）")
+
+    merged = {**old_vectors, **vectors}
+    if not merged:
+        print("  ❌ 没有算出任何向量，索引未写入。")
+        return 1
+
     INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
     INDEX_PATH.write_text(
         json.dumps(
@@ -165,8 +204,8 @@ def main() -> int:
                 "dimensions": dims,
                 "built_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime()),
                 "knowledge_base": str(DEFAULT_KB_PATH.relative_to(ROOT)).replace("\\", "/"),
-                "count": len(vectors),
-                "vectors": {k: [round(x, 6) for x in v] for k, v in vectors.items()},
+                "count": len(merged),
+                "vectors": {k: [round(x, 6) for x in v] for k, v in merged.items()},
             },
             ensure_ascii=False,
         ),
@@ -179,8 +218,13 @@ def main() -> int:
     print("索引已写入")
     print("=" * 74)
     print(f"  文件     : {INDEX_PATH}")
-    print(f"  条数     : {len(vectors)}   维度 {dims}   体积 {size_mb:.2f} MB")
+    print(f"  条数     : {len(merged)}   维度 {dims}   体积 {size_mb:.2f} MB")
     print(f"  本次花费 : 约 {est_cost:.5f} 元（{len(pending)} 条实际调用了接口）")
+    kb_total = len(load_cases())
+    if len(merged) < kb_total:
+        print(f"  ⚠️ 索引只覆盖 {len(merged)}/{kb_total} 条案例"
+              f"（用 --limit 试跑过就会这样），其余案例的 dense 检索会报「索引缺失」。")
+        print("     要补齐请跑：python build_index.py")
     print()
     print("  接下来可以跑对比：")
     print("    python eval_retrieval.py --backend bm25")

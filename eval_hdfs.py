@@ -1,13 +1,30 @@
 """阶段 5 评测：用 Loghub 真实日志（HDFS_2k.log, 2000 行）验证解析器，产出量化指标。
 
-运行：python eval_hdfs.py
+运行方式（任选一种）：
+    1. 直接双击本文件
+    2. 在终端里： .venv\\Scripts\\python.exe eval_hdfs.py
+
+不调用大模型，**零成本**。
 """
+from __future__ import annotations
+
 import random
 import re
+import sys
 import time
 from collections import Counter
+from pathlib import Path
 
-from app.parser import parse_text
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+if __name__ == "__main__":
+    # ⚠️ 必须在导入任何项目模块**之前**切到 .venv（双击时用的是系统 Python）
+    from app.launcher import reenter_venv
+
+    reenter_venv()
+
+from app.parser import parse_text  # noqa: E402
 
 _TS_HDFS = re.compile(r"^\d{6} \d{6}$")
 _LEVELS = {"INFO", "WARN", "ERROR", "DEBUG", "FATAL", "WARNING", "CRITICAL"}
@@ -15,7 +32,8 @@ _MODULE_PATTERN = re.compile(r"^dfs\.\w+(\$\w+)?$")
 
 
 def main() -> None:
-    raw = open("data/HDFS_2k.log", encoding="utf-8").read()
+    # 锚定项目根目录，不依赖当前工作目录
+    raw = (ROOT / "data" / "HDFS_2k.log").read_text(encoding="utf-8")
     total = len([l for l in raw.splitlines() if l.strip()])
 
     t0 = time.perf_counter()
@@ -56,4 +74,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from app.launcher import pause_if_console
+
+    try:
+        main()
+    finally:
+        pause_if_console()

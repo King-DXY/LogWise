@@ -25,3 +25,52 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build Docker image
         run: docker build -t logwise:latest .
+      # ---------------------------------------------------------------- #
+      # 容器冒烟测试。
+      #
+      # 为什么必须有：单元测试全过、镜像能构建，都不代表容器里跑得起来。
+      # 实测踩过一次 —— .dockerignore 把 data/ 排除了，容器里没有知识库
+      # （data/fault_cases.jsonl），get_retriever() 的降级分支内部又去读
+      # 同一个文件、再次抛异常，于是容器内的 /stats 直接 500。
+      # pytest 完全测不出来（本机有那个文件），只有真把镜像跑起来才会暴露。
+      #
+      # /stats 是关键那一项：它会调 rag.describe() → get_retriever().size()，
+      # 而检索层又依赖 data/fault_cases.jsonl。
+      # ---------------------------------------------------------------- #
+      - name: Smoke test the container
+        run: |
+          set -e
+          docker run -d --name logwise-smoke -p 8000:8000 logwise:latest
+
+          echo "--- 等待服务就绪 ---"
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+              echo "服务已就绪（第 ${i} 次探测）"
+              break
+            fi
+            sleep 1
+          done
+
+          echo "--- /health（含接口契约版本）---"
+          curl -fsS http://localhost:8000/health | tee /dev/stderr | grep -q '"status":"ok"'
+
+          echo "--- /stats（依赖知识库，缺文件会 500）---"
+          curl -fsS http://localhost:8000/stats > /tmp/stats.json
+          grep -q '"knowledge_base_size"' /tmp/stats.json
+
+          echo "--- 知识库是否真的进了镜像 ---"
+          docker exec logwise-smoke test -f /app/data/fault_cases.jsonl
+          echo "data/fault_cases.jsonl 存在"
+
+          echo "--- /context（纯本地，不花钱）---"
+          curl -fsS -X POST http://localhost:8000/context \
+            -H 'Content-Type: application/json' \
+            --data-binary '{"text":"2026-01-01 00:00:00,000 ERROR [x] com.example.A - boom"}' \
+            | grep -q '"total_parsed"'
+
+          echo "--- 静态演示页 ---"
+          curl -fsS http://localhost:8000/ | grep -q 'LogWise'
+
+          echo "--- 容器日志 ---"
+          docker logs logwise-smoke
+          docker rm -f logwise-smoke

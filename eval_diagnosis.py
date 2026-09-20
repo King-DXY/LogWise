@@ -32,15 +32,23 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
-from dotenv import load_dotenv
-from openai import OpenAI
+if __name__ == "__main__":
+    # ⚠️ 必须在导入任何项目模块**之前**切到 .venv。
+    # 双击运行时用的是系统全局 Python，而 openai / python-dotenv 只装在 .venv 里 ——
+    # 放到文件末尾的 __main__ 里调用就太晚了，下面这些 import 已经会崩。
+    from app.launcher import reenter_venv
 
-from app import cache as cache_mod
-from app.context import build_context, context_enabled, context_max_logs, context_window
-from app.diagnose import _extract_usage, current_model, format_logs
-from app.metrics import price_input, price_input_cached, price_output
-from app.parser import parse_text
-from app.prompts import FEW_SHOT_EXAMPLES, PROMPT_VERSION, SYSTEM_PROMPT
+    reenter_venv()
+
+from dotenv import load_dotenv  # noqa: E402
+from openai import OpenAI  # noqa: E402
+
+from app import cache as cache_mod  # noqa: E402
+from app.context import build_context, context_enabled, context_max_logs, context_window  # noqa: E402
+from app.diagnose import _extract_usage, current_model, format_logs  # noqa: E402
+from app.metrics import price_input, price_input_cached, price_output  # noqa: E402
+from app.parser import parse_text  # noqa: E402
+from app.prompts import FEW_SHOT_EXAMPLES, PROMPT_VERSION, SYSTEM_PROMPT  # noqa: E402
 
 load_dotenv(ROOT / ".env")
 
@@ -435,4 +443,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from app.launcher import pause_if_console
+
+    try:
+        main()
+    finally:
+        # 双击运行时窗口会一闪而过，留个停顿让人看到结果
+        pause_if_console()
