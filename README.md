@@ -2,7 +2,7 @@
 
 粘贴一段线上报错日志 → LLM 返回结构化诊断（错误类型 / 根因 / 影响范围 / 排查步骤 / 置信度），SSE 流式输出。
 
-`Python 3.11` · `FastAPI` · `DeepSeek` · `pytest 198 项` · `Docker` · `Kubernetes`
+`Python 3.11` · `FastAPI` · `DeepSeek` · `pytest 289 项` · `Docker` · `Kubernetes`
 
 ---
 
@@ -85,6 +85,14 @@ DeepSeek 会自动缓存重复出现的 Prompt 前缀。最初按「全部输入
 **任一变化旧缓存自动失效**。这是缓存类功能最隐蔽的坑：
 改了 Prompt 却命中旧缓存，你会以为「改了没效果」。
 
+### 自动化
+
+`.github/workflows/ci.yml`：跑测试 → 构建镜像 → **把容器真的跑起来做冒烟测试**
+（轮询 `/health`、打 `/stats`、`docker exec` 确认 `data/fault_cases.jsonl` 在镜像里）。
+
+第二步不是多余的。实测踩过一次「pytest 全过、镜像也能构建，但容器里 `/stats` 直接 500」——
+`.dockerignore` 排除了运行时必需的数据文件，**本机有那个文件的测试永远发现不了**。
+
 ---
 
 ## 更多
@@ -92,6 +100,6 @@ DeepSeek 会自动缓存重复出现的 Prompt 前缀。最初按「全部输入
 | 文档 | 内容 |
 | --- | --- |
 | [docs/API.md](docs/API.md) | 7 个接口；GET 版有 32K 字符上限，长日志必须用 POST；鉴权 / 限流 / 缓存的设计理由 |
-| [docs/DEPLOY.md](docs/DEPLOY.md) | 一键启动、环境变量、Docker / Kubernetes、**项目结构** |
+| [docs/DEPLOY.md](docs/DEPLOY.md) | 一键启动、环境变量、Docker / Kubernetes、CI（含**容器冒烟测试**）、**项目结构** |
 | [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) | 全部 A/B 表格：Prompt 对比、参数扫描、检索质量、三后端对比、评测集设计 |
-| [docs/PITFALLS.md](docs/PITFALLS.md) | 14 条真实排障记录（SSE 阻塞、镜像缓存、Few-shot 幻觉、默认参数陷阱…） |
+| [docs/PITFALLS.md](docs/PITFALLS.md) | 23 条真实排障记录（SSE 阻塞、镜像缓存、Few-shot 幻觉、`zip` 静默截断、30 分钟默认超时…） |

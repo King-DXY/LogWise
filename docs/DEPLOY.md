@@ -45,6 +45,7 @@ uvicorn app.main:app --reload --port 8000
 | 变量 | 用途 |
 | --- | --- |
 | `DEEPSEEK_API_KEY` / `DEEPSEEK_BASE_URL` / `DEEPSEEK_MODEL` | 诊断模型 |
+| `LOGWISE_LLM_TIMEOUT` / `LOGWISE_LLM_CONNECT_TIMEOUT` / `LOGWISE_LLM_MAX_RETRIES` | 模型调用的超时与重试。**务必配置** —— SDK 默认 read=600 秒 + 2 次重试，最坏能挂约 30 分钟 |
 | `EMBEDDING_API_KEY` / `EMBEDDING_BASE_URL` / `EMBEDDING_MODEL` | 向量化（可选，仅向量后端需要） |
 | `LOGWISE_API_KEY` | 接口鉴权，留空即关闭 |
 | `LOGWISE_RATE_LIMIT` / `LOGWISE_RATE_WINDOW` | 限流阈值 |
@@ -56,7 +57,7 @@ uvicorn app.main:app --reload --port 8000
 ## 测试与评测
 
 ```bash
-pytest                              # 单元测试（198 项全通过）
+pytest                              # 单元测试（289 项全通过）
 python eval_hdfs.py                 # 解析器评测（Loghub HDFS_2k，2000 行）
 python eval_retrieval.py            # 检索评测（零成本，不调模型）
 python eval_retrieval.py --compare  # 三后端并排对比
@@ -65,8 +66,23 @@ python eval_diagnosis.py --from-git HEAD   # 评测历史版本的 Prompt，用�
 python build_index.py               # 构建向量索引（约 0.005 元）
 ```
 
-`eval_retrieval.py` / `eval_diagnosis.py` / `build_index.py` 都支持**双击运行**
-（会自动切换到项目虚拟环境，结束后停留让你看结果）。
+项目里的**脚本全部支持双击运行**（会自动切换到项目虚拟环境，结束后停留让你看结果）：
+
+| 脚本 | 说明 | 花钱吗 |
+| --- | --- | --- |
+| `app\run.py` | 启动服务 | 否 |
+| `demo_parse.py` | 演示：日志解析 | 否 |
+| `demo_context.py` | 演示：上下文聚合的新旧差别 | 约 0.002 元 |
+| `demo_diagnose.py` | 演示：调 LLM 诊断一条日志 | 约 0.001 元 |
+| `eval_hdfs.py` | 解析器评测（Loghub 真实数据） | 否 |
+| `eval_retrieval.py` | 检索质量评测（`--compare` 三后端对比） | 否* |
+| `eval_diagnosis.py` | 诊断质量评测 | 约 0.04 元 |
+| `build_index.py` | 构建向量索引 | 约 0.005 元 |
+
+\* `eval_retrieval.py` 用 `dense` / `hybrid` 后端时会把 query 向量化（已缓存的文本不重复计费）。
+
+> 脚本内部统一用 `app/launcher.py` 做虚拟环境切换，路径也统一锚定到项目根目录，
+> 所以「双击」和「在任意目录下用命令行运行」效果一致。
 
 ---
 
@@ -118,6 +134,7 @@ LogWise/
 ├── app/
 │   ├── run.py           # 一键启动器（双击即可运行）
 │   ├── launcher.py      # 虚拟环境切换 + 控制台窗口停留（供各脚本复用）
+│   ├── apikey.py        # API Key 读取与「占位符」判定（各调用方共用同一套判据）
 │   ├── main.py          # FastAPI 入口 + SSE 流式接口
 │   ├── parser.py        # 日志解析器（通用 + HDFS 格式）
 │   ├── context.py       # 日志上下文聚合：决定把哪些日志送给模型
@@ -140,7 +157,7 @@ LogWise/
 │   └── fault_cases.jsonl        # 故障案例知识库（53 条「日志 → 诊断」，供检索使用）
 ├── docs/                # 本目录：接口、部署、实验数据、踩坑记录
 ├── static/index.html    # 演示页
-├── tests/               # 单元测试（198 项）
+├── tests/               # 单元测试（289 项）
 │   ├── test_parser.py           # 解析器
 │   ├── test_context.py          # 上下文聚合
 │   ├── test_guard.py            # 鉴权 / 限流 / 缓存 / 度量
@@ -149,6 +166,8 @@ LogWise/
 │   ├── test_knowledge_base.py   # 知识库结构 + 与评测集 / 示例的隔离检查
 │   ├── test_retriever.py        # 检索层（分词 / 打分 / Dense / Hybrid）
 │   ├── test_embedding.py        # 向量化客户端
+│   ├── test_diagnose.py         # 诊断引擎（结构校验 / 格式重试 / 超时配置）
+│   ├── test_apikey.py           # API Key 占位符判定（含三处调用方的一致性）
 │   ├── test_rag.py              # RAG 注入
 │   └── test_api.py              # HTTP 接口层
 ├── k8s/                 # Deployment / Service / HPA
@@ -161,6 +180,21 @@ LogWise/
 ├── build_index.py       # 构建向量索引（报出实际花费；已缓存的条目不重复计费）
 ├── Dockerfile
 ├── docker-compose.yml
+├── .dockerignore        # ⚠️ 判断标准是「运行时是否需要」，别把 data/ 排除了（见 PITFALLS.md）
 ├── requirements.txt
+├── .github/workflows/   # CI：跑测试 → 构建镜像 → 容器冒烟测试
 └── .env.example         # 环境变量模板（真实 Key 放在 .env，已被 gitignore）
 ```
+
+## CI
+
+`.github/workflows/ci.yml` 两个 job：
+
+1. **test** —— 装依赖 + `pytest tests/ -v`
+2. **build** —— 构建镜像，然后**真的把容器跑起来**做冒烟测试：
+   轮询 `/health`；打 `/stats`（依赖知识库）；`docker exec` 确认
+   `data/fault_cases.jsonl` 确实在镜像里；打 `/context` 与静态首页。
+
+> 第 2 步不是多余的。实测踩过一次：单元测试全过、镜像也能构建，
+> 但 `.dockerignore` 排除了 `data/`，容器里没有知识库，
+> 于是容器内的 `/stats` 直接 500 —— **pytest 完全测不出来，只有真跑起来才会暴露**。
