@@ -115,15 +115,23 @@ def check_env_file() -> str | None:
         elif name == "DEEPSEEK_BASE_URL":
             base_url = value
 
-    if not key or key.startswith("sk-在这里") or len(key) < 20:
+    # 占位符判定统一走 app.apikey —— 这里原先自己匹配 "sk-在这里"，
+    # 且额外用 len(key) < 20 猜长度，会误伤合法的短 Key。
+    from app.apikey import is_placeholder, mask
+
+    if is_placeholder(key):
         print("  [提醒] .env 里的 DEEPSEEK_API_KEY 还没填，AI 诊断功能将不可用。")
         print(f"        文件位置：{env_path}")
         print("        （不过「解析日志」功能不需要 Key，仍然可以正常演示）")
         print()
         return None
 
-    print(f"  [OK] 已读到 API Key（{key[:6]}****{key[-4:]}）")
+    print(f"  [OK] 已读到 API Key（{mask(key)}）")
     print(f"  [OK] 接口地址：{base_url or 'https://api.deepseek.com'}")
+    if len(key) < 20:
+        # 只提醒、不当成「没填」—— 长度不是可靠信号，误判成未配置更糟
+        print(f"  [注意] 这个 Key 只有 {len(key)} 个字符，比常见长度短。")
+        print("         如果调用时报 401，请核对是否复制完整。")
     return key
 
 

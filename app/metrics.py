@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import math
 import os
 import threading
 import time
@@ -43,6 +44,21 @@ def _read_price(name: str, default: float) -> float:
     except ValueError:
         return default
     return value if value >= 0 else default
+
+
+def _percentile(sorted_values: list[float], q: float) -> float:
+    """最近秩（nearest-rank）分位数，``sorted_values`` 必须已升序排列。
+
+    ⚠️ 不要写成 ``values[int(len(values) * q)]`` —— 那样少减了一次，
+    取到的是第 q*n 个元素（从 0 计数），实测 **n ≤ 20 时结果恒等于最大值**，
+    而 RECENT_LIMIT 正好是 20，等于 p95 这个指标永远在报 max。
+    最近秩的正确定义是取第 ceil(q*n) 个（从 1 开始计数）。
+    """
+    if not sorted_values:
+        return 0.0
+    n = len(sorted_values)
+    rank = max(1, math.ceil(q * n))
+    return sorted_values[min(rank - 1, n - 1)]
 
 
 def price_input() -> float:
@@ -106,6 +122,10 @@ class CallRecord:
     completion_tokens: int = 0
     cache_hit: bool = False         # 命中本服务的诊断缓存（完全不调模型）
     tokens_estimated: bool = False
+    # 是否**真的**调用了大模型。
+    # ⚠️ 不要用 endpoint 前缀来判断 —— 缓存命中和"没解析到日志"都走 /diagnose，
+    #    但它们一次模型都没调。之前按前缀判断，导致 llm_calls 被算成
+    #    "diagnose 请求数"，指标名与含义不符。现在由调用方显式传入。
     llm_call: bool = False
     error: str = ""
     ts: float = field(default_factory=time.time)
@@ -153,6 +173,7 @@ class MetricsStore:
         self._errors = 0
         self._cache_hits = 0
         self._llm_calls = 0
+        self._billable_calls = 0
         self._prompt_tokens = 0
         self._cached_prompt_tokens = 0
         self._completion_tokens = 0
@@ -168,6 +189,11 @@ class MetricsStore:
                 self._cache_hits += 1
             if rec.llm_call:
                 self._llm_calls += 1
+            # 计费调用的唯一判据是"产生了费用"，而不是"调用是否发生"。
+            # 模型调用失败（如返回非 JSON）不会产生 token，也就不该被算作计费调用 ——
+            # 否则 avg_per_billable_call 会被低估：分子只有真实花费，分母却含失败次数。
+            if rec.cost() > 0:
+                self._billable_calls += 1
             if rec.tokens_estimated:
                 self._estimated_calls += 1
             self._prompt_tokens += rec.prompt_tokens
@@ -183,6 +209,7 @@ class MetricsStore:
             total = self._total
             llm_calls = self._llm_calls
             cache_hits = self._cache_hits
+            billable = self._billable_calls
             prompt_tokens = self._prompt_tokens
             cached_prompt_tokens = self._cached_prompt_tokens
             completion_tokens = self._completion_tokens
@@ -191,8 +218,10 @@ class MetricsStore:
             estimated = self._estimated_calls
             started = self._started_at
 
-        # 计费请求 = 真正打到模型的次数；缓存命中不计费
-        billable = llm_calls - cache_hits if llm_calls >= cache_hits else llm_calls
+        # 缓存命中率的分母是「需要诊断的请求」= 真的调了模型的 + 被缓存挡下来的。
+        # 不能用 llm_calls 当分母 —— 修复 llm_calls 口径（不再计入缓存命中）之后，
+        # 那样算出来会大于 1。
+        diagnose_requests = llm_calls + cache_hits
         return {
             "uptime_seconds": round(time.time() - started, 1),
             "price": {
@@ -207,12 +236,14 @@ class MetricsStore:
                 "errors": errors,
                 "llm_calls": llm_calls,
                 "cache_hits": cache_hits,
-                "cache_hit_rate": round(cache_hits / llm_calls, 4) if llm_calls else 0.0,
+                "cache_hit_rate": (
+                    round(cache_hits / diagnose_requests, 4) if diagnose_requests else 0.0
+                ),
                 "billable_calls": billable,
             },
             "latency_ms": {
                 "avg": round(sum(durations) / len(durations), 2) if durations else 0.0,
-                "p95": durations[int(len(durations) * 0.95)] if durations else 0.0,
+                "p95": round(_percentile(durations, 0.95), 2),
                 "max": round(durations[-1], 2) if durations else 0.0,
                 "sample_size": len(durations),
                 "note": "统计范围：最近保留的记录",
@@ -244,6 +275,7 @@ class MetricsStore:
             self._errors = 0
             self._cache_hits = 0
             self._llm_calls = 0
+            self._billable_calls = 0
             self._prompt_tokens = 0
             self._cached_prompt_tokens = 0
             self._completion_tokens = 0

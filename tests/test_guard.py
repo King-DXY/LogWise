@@ -206,6 +206,45 @@ class TestDiagnosisCache:
         assert cache_mod.chunk_text("") == [""]
         assert "".join(cache_mod.chunk_text("任意内容" * 50)) == "任意内容" * 50
 
+    def test_disabled_cache_really_does_not_cache(self, monkeypatch):
+        """``LOGWISE_CACHE_ENABLED=false`` 必须真的关掉缓存。
+
+        修复前只有 ``snapshot()`` 读了开关，get/set 完全没检查 ——
+        于是它只是"显示成关闭"，实际照样缓存，是一个不起作用的配置项。
+        """
+        monkeypatch.setenv("LOGWISE_CACHE_ENABLED", "false")
+        c = cache_mod.DiagnosisCache()
+        c.set("k", "v")
+        assert c.get("k") is None
+        assert c.snapshot()["size"] == 0
+        assert c.snapshot()["enabled"] is False
+
+    def test_clear_keeps_counters(self, monkeypatch):
+        monkeypatch.setenv("LOGWISE_CACHE_TTL", "60")
+        c = cache_mod.DiagnosisCache()
+        c.set("k", "v")
+        c.get("k")
+        c.clear()
+        snap = c.snapshot()
+        assert snap["size"] == 0
+        assert snap["hits"] == 1, "clear() 只清数据，计数保留"
+
+    def test_reset_clears_counters_too(self, monkeypatch):
+        """``/stats/reset`` 的返回消息是「统计与缓存已清零」，就必须真的清零。
+
+        修复前它调的是 clear()，只清了数据 —— 做对照实验时会在数字里
+        看到上一轮的 hits/misses 混进来。
+        """
+        monkeypatch.setenv("LOGWISE_CACHE_TTL", "60")
+        c = cache_mod.DiagnosisCache()
+        c.set("k", "v")
+        c.get("k")
+        c.get("nope")
+        c.reset()
+        snap = c.snapshot()
+        assert snap["size"] == 0
+        assert (snap["hits"], snap["misses"], snap["evictions"]) == (0, 0, 0)
+
 
 # --------------------------------------------------------------------------- #
 # 度量
@@ -247,22 +286,79 @@ class TestMetrics:
         store.record(metrics.CallRecord(
             endpoint="/diagnose", duration_ms=100,
             prompt_tokens=1000, completion_tokens=500, llm_call=True))
+        # 缓存命中：一次模型都没调，所以 llm_call=False（这正是修复前算错的地方）
         store.record(metrics.CallRecord(
-            endpoint="/diagnose", duration_ms=10,
-            llm_call=True, cache_hit=True))
+            endpoint="/diagnose", duration_ms=10, cache_hit=True))
         store.record(metrics.CallRecord(
             endpoint="/parse", duration_ms=2))
 
         out = store.summary()
         assert out["requests"]["total"] == 3
-        assert out["requests"]["llm_calls"] == 2
+        assert out["requests"]["llm_calls"] == 1
         assert out["requests"]["cache_hits"] == 1
+        # 分母是「需要诊断的请求」= llm_calls + cache_hits = 2
         assert out["requests"]["cache_hit_rate"] == 0.5
         assert out["requests"]["billable_calls"] == 1
         assert out["tokens"]["total"] == 1500
         # 1000/1e6*1.0 + 500/1e6*2.0 = 0.002
         assert out["cost"]["total"] == pytest.approx(0.002)
         assert out["cost"]["avg_per_billable_call"] == pytest.approx(0.002)
+
+    def test_llm_calls_counts_only_real_model_invocations(self):
+        """缓存命中走的也是 /diagnose，但它没有调用模型 —— 不能计入 llm_calls。
+
+        修复前 main.py 用 ``endpoint.startswith("/diagnose")`` 判断，
+        于是 llm_calls 实际等于"diagnose 请求数"，指标名与含义不符。
+        """
+        store = metrics.MetricsStore()
+        store.record(metrics.CallRecord(endpoint="/diagnose", duration_ms=1, cache_hit=True))
+        store.record(metrics.CallRecord(endpoint="/context", duration_ms=1))
+        store.record(metrics.CallRecord(endpoint="/diagnose", duration_ms=1, error="no logs"))
+        assert store.summary()["requests"]["llm_calls"] == 0
+
+        store.record(metrics.CallRecord(endpoint="/diagnose", duration_ms=1, llm_call=True))
+        assert store.summary()["requests"]["llm_calls"] == 1
+
+    def test_failed_model_call_is_not_billable(self):
+        """模型调用失败不产生 token，也就不该被算成"计费调用"。
+
+        修复前用的是 ``billable = llm_calls - cache_hits`` —— 失败调用会被算进
+        计费次数，而分子（花费）只有真实那一次，导致均价被低估。
+        """
+        store = metrics.MetricsStore()
+        store.record(metrics.CallRecord(
+            endpoint="/diagnose", duration_ms=100, llm_call=True,
+            prompt_tokens=1000, completion_tokens=500))
+        store.record(metrics.CallRecord(
+            endpoint="/diagnose", duration_ms=50, llm_call=True, error="JSONDecodeError"))
+        out = store.summary()
+        assert out["requests"]["llm_calls"] == 2
+        assert out["requests"]["billable_calls"] == 1
+        assert out["cost"]["avg_per_billable_call"] == out["cost"]["total"]
+
+    def test_p95_is_not_just_the_max(self, monkeypatch):
+        """p95 必须真的落在 95 分位，不能恒等于最大值。
+
+        修复前是 ``durations[int(len * 0.95)]``，少减了一次；而 RECENT_LIMIT=20，
+        于是样本 ≤20 时 p95 永远等于 max —— 这个指标完全失去意义。
+        """
+        store = metrics.MetricsStore()
+        for i in range(100):          # 100 条，耗时 1..100
+            store.record(metrics.CallRecord(endpoint="/parse", duration_ms=i + 1))
+        lat = store.summary()["latency_ms"]
+        assert lat["max"] == 100
+        # 最近秩：取第 ceil(0.95*100)=95 个 → 下标 94 → 值 95
+        assert lat["p95"] == 95
+        assert lat["p95"] < lat["max"]
+
+    def test_percentile_small_samples(self):
+        """小样本下 p95 取到的是最大值（最近秩的定义如此），但绝不能越界。"""
+        assert metrics._percentile([], 0.95) == 0.0
+        assert metrics._percentile([7.0], 0.95) == 7.0
+        assert metrics._percentile([1.0, 2.0], 0.95) == 2.0
+        # 20 条：ceil(19)=19 → 下标 18（第 19 个），不是最大值
+        vals = [float(i) for i in range(20)]
+        assert metrics._percentile(vals, 0.95) == 18.0
 
     def test_error_counting_and_reset(self):
         store = metrics.MetricsStore()
@@ -271,6 +367,7 @@ class TestMetrics:
 
         store.reset()
         assert store.summary()["requests"]["total"] == 0
+        assert store.summary()["requests"]["billable_calls"] == 0
         assert store.summary()["cost"]["total"] == 0.0
 
     def test_summary_empty_store_is_safe(self):

@@ -12,13 +12,16 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
 
+from app.apikey import read_api_key
 from app.parser import ParsedLog
 # PROMPT_VERSION 在本模块内未直接使用，但 main / 评测脚本一直从这里取，
 # 保持这个再导出以免破坏既有调用方。
@@ -34,6 +37,62 @@ else:
 
 _client: OpenAI | None = None
 _async_client: AsyncOpenAI | None = None
+_client_lock = threading.Lock()
+
+# --------------------------------------------------------------------------- #
+# 超时与重试
+#
+# ⚠️ 必须显式设置。OpenAI SDK 的默认值是 connect=5 / read=600 / write=600 / pool=600，
+#    并且 max_retries=2 —— 最坏情况 600 秒 ×（1 次原始 + 2 次重试）≈ 30 分钟挂住。
+#    而实测一次诊断平均只要 2 秒，这个上限毫无意义，只会让故障时无法快速失败
+#    （对 SSE 接口来说，就是浏览器一直转圈）。
+# --------------------------------------------------------------------------- #
+DEFAULT_READ_TIMEOUT = 60.0
+DEFAULT_CONNECT_TIMEOUT = 5.0
+DEFAULT_MAX_RETRIES = 1
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        value = float(os.getenv(name, ""))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def read_timeout() -> float:
+    """单次请求的读超时（秒）。"""
+    return _float_env("LOGWISE_LLM_TIMEOUT", DEFAULT_READ_TIMEOUT)
+
+
+def connect_timeout() -> float:
+    return _float_env("LOGWISE_LLM_CONNECT_TIMEOUT", DEFAULT_CONNECT_TIMEOUT)
+
+
+def max_retries() -> int:
+    """SDK 层的网络重试次数。
+
+    注意这**不是**「输出格式重试」—— 那是本模块自己的逻辑（见 diagnose_multi_ex）。
+    """
+    try:
+        value = int(os.getenv("LOGWISE_LLM_MAX_RETRIES", DEFAULT_MAX_RETRIES))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RETRIES
+    return max(0, min(5, value))
+
+
+def _client_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=connect_timeout(),
+        read=read_timeout(),
+        write=read_timeout(),
+        pool=connect_timeout(),
+    )
+
+
+def client_options() -> dict:
+    """构造 OpenAI 客户端时共用的参数，方便统一调整与测试。"""
+    return {"timeout": _client_timeout(), "max_retries": max_retries()}
 
 
 @dataclass
@@ -87,16 +146,21 @@ def current_model() -> str:
 
 
 def get_client() -> OpenAI:
-    """懒加载单例同步客户端：只在第一次调用时创建，之后复用。"""
+    """懒加载单例同步客户端：只在第一次调用时创建，之后复用。
+
+    加锁的原因：FastAPI 的同步端点跑在线程池里，两个请求同时首次进来时
+    会各建一个客户端 —— 多出来的那个再也不会被关闭，连接池被白白占着。
+    """
     global _client
     if _client is None:
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        if not api_key or api_key.startswith("sk-在这里"):
-            raise RuntimeError("未检测到有效的 DEEPSEEK_API_KEY，请检查 .env 文件")
-        _client = OpenAI(
-            api_key=api_key,
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        )
+        with _client_lock:
+            if _client is None:
+                api_key = _require_api_key()
+                _client = OpenAI(
+                    api_key=api_key,
+                    base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                    **client_options(),
+                )
     return _client
 
 
@@ -104,14 +168,27 @@ def get_async_client() -> AsyncOpenAI:
     """懒加载单例异步客户端：供 SSE 流式接口使用，避免同步 IO 阻塞事件循环。"""
     global _async_client
     if _async_client is None:
-        api_key = os.getenv("DEEPSEEK_API_KEY")
-        if not api_key or api_key.startswith("sk-在这里"):
-            raise RuntimeError("未检测到有效的 DEEPSEEK_API_KEY，请检查 .env 文件")
-        _async_client = AsyncOpenAI(
-            api_key=api_key,
-            base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        )
+        with _client_lock:
+            if _async_client is None:
+                api_key = _require_api_key()
+                _async_client = AsyncOpenAI(
+                    api_key=api_key,
+                    base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                    **client_options(),
+                )
     return _async_client
+
+
+def _require_api_key() -> str:
+    """取诊断用的 API Key；没填（或还是占位符）就给出可读的报错。
+
+    判定交给 ``app.apikey`` 统一处理 —— 之前这里自己匹配 ``"sk-在这里"``，
+    和 embedding / run 里的写法各不相同，改一处漏一处会静默失效。
+    """
+    api_key = read_api_key("DEEPSEEK_API_KEY")
+    if api_key is None:
+        raise RuntimeError("未检测到有效的 DEEPSEEK_API_KEY，请检查 .env 文件")
+    return api_key
 
 
 def format_logs(logs: list[ParsedLog]) -> str:
@@ -186,13 +263,106 @@ def prompt_char_size(logs: ParsedLog | list[ParsedLog]) -> int:
     return sum(len(m["content"]) for m in build_messages(logs))
 
 
+# 诊断结果必须包含的字段。与 app/prompts.py 里约定的输出格式一一对应。
+REQUIRED_FIELDS = ("error_type", "root_cause", "impact", "solution_steps", "confidence")
+# 这几个字段必须是数组（evidence 是 v3 才加的，缺失可以接受，但不能是别的类型）
+LIST_FIELDS = ("solution_steps", "evidence")
+
+# 格式不合格时回给模型的重试指令
+CORRECTION_PROMPT = """你上一条回复不符合要求：{problem}
+
+请重新输出，并且**只输出一个 JSON 对象**：
+1. 必须包含这些字段：error_type、root_cause、evidence、impact、solution_steps、confidence
+2. evidence 和 solution_steps 必须是数组
+3. confidence 必须是 0 到 1 之间的数字
+4. 不要输出任何解释性文字，也不要用 Markdown 代码块包裹"""
+
+
+class DiagnosisFormatError(RuntimeError):
+    """模型返回的内容不符合约定的 JSON 结构（重试之后仍然如此）。"""
+
+
+def _json_candidates(text: str) -> list[str]:
+    """给出几种可能的 JSON 片段，按「越原始越优先」排列。
+
+    真实遇到过的形态：裸 JSON、被 ```json 包裹、前面带一句解释再跟 JSON。
+    """
+    stripped = text.strip()
+    out = [stripped]
+
+    # 去掉代码块围栏（大小写与语言标注都可能变）
+    if stripped.startswith("```"):
+        body = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+        out.append(body.removesuffix("```").strip())
+
+    # 兜底：截取第一个 { 到最后一个 } 之间的内容
+    start, end = stripped.find("{"), stripped.rfind("}")
+    if start != -1 and end > start:
+        out.append(stripped[start : end + 1])
+
+    return [c for c in out if c]
+
+
 def _parse_json(content: str) -> dict:
-    """把模型返回的文本解析成 dict，容忍被 ```json 代码块包裹的情况。"""
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        cleaned = content.strip().removeprefix("```json").removesuffix("```").strip()
-        return json.loads(cleaned)
+    """把模型返回的文本解析成 dict。
+
+    尽量宽容（裸 JSON / 代码块 / 前后带解释都能救回来），
+    但**失败时一定会抛 JSONDecodeError**，绝不返回半成品。
+    """
+    text = content or ""
+    last_error: json.JSONDecodeError | None = None
+    for candidate in _json_candidates(text):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+        last_error = json.JSONDecodeError("顶层不是 JSON 对象", candidate, 0)
+    raise last_error or json.JSONDecodeError("模型返回了空内容", text, 0)
+
+
+def schema_problems(result: object) -> list[str]:
+    """检查诊断结果的结构，返回问题列表（空列表表示合格）。
+
+    为什么要查：``response_format={"type": "json_object"}`` 只保证「是合法 JSON」，
+    **不保证字段齐全**。实测模型返回过 ``{"error_type": 1}`` 这种残缺结构，
+    接口照常 200 返回，前端拿到缺字段的对象就会崩
+    （之前出现过的 ``Cannot read properties of undefined`` 就是这个成因）。
+    """
+    if not isinstance(result, dict):
+        return [f"顶层应该是对象，实际是 {type(result).__name__}"]
+
+    problems: list[str] = []
+    missing = [f for f in REQUIRED_FIELDS if f not in result]
+    if missing:
+        problems.append("缺少字段 " + "、".join(missing))
+
+    for field in LIST_FIELDS:
+        if field in result and not isinstance(result[field], list):
+            problems.append(f"{field} 应该是数组")
+
+    if "confidence" in result:
+        conf = result["confidence"]
+        if isinstance(conf, bool) or not isinstance(conf, (int, float)):
+            problems.append("confidence 应该是数字")
+        elif not 0 <= conf <= 1:
+            problems.append(f"confidence={conf} 超出 0~1 范围")
+
+    if "error_type" in result and not isinstance(result["error_type"], str):
+        problems.append("error_type 应该是字符串")
+
+    return problems
+
+
+def _sum_usage(a: Usage, b: Usage) -> Usage:
+    """重试时把两次调用的用量累加 —— 钱是真花了，不能不记。"""
+    return Usage(
+        prompt_tokens=a.prompt_tokens + b.prompt_tokens,
+        completion_tokens=a.completion_tokens + b.completion_tokens,
+        cached_tokens=a.cached_tokens + b.cached_tokens,
+    )
 
 
 def diagnose_ex(log: ParsedLog) -> tuple[dict, Usage]:
@@ -200,16 +370,55 @@ def diagnose_ex(log: ParsedLog) -> tuple[dict, Usage]:
     return diagnose_multi_ex([log])
 
 
-def diagnose_multi_ex(logs: list[ParsedLog]) -> tuple[dict, Usage]:
-    """调用 DeepSeek（一组日志上下文），返回 (结构化诊断 dict, token 用量)。"""
-    resp = get_client().chat.completions.create(
-        model=current_model(),
-        messages=build_messages(logs),
-        temperature=0.2,  # 诊断任务要稳定可复现，温度调低
-        response_format={"type": "json_object"},  # 强制模型输出合法 JSON
+def diagnose_multi_ex(logs: list[ParsedLog], retries: int = 1) -> tuple[dict, Usage]:
+    """调用 DeepSeek（一组日志上下文），返回 (结构化诊断 dict, token 用量)。
+
+    拿到结果后**会校验结构**；不合格就把问题反馈给模型重试一次，
+    仍然不合格才抛 ``DiagnosisFormatError``。
+
+    为什么必须重试：实测偶发过模型返回大白话（如"这段日志信息不足，我无法给出结构化诊断"），
+    于是 ``json.loads`` 抛 ``JSONDecodeError``，接口直接 502 —— 而把异常原文
+    （``Expecting value: line 1 column 1``）甩给用户毫无意义。
+    重试一次通常就能拿到合规结果。
+    """
+    messages = build_messages(logs)
+    attempts = max(1, retries + 1)
+    total = Usage()
+    last_problem = ""
+    last_excerpt = ""
+
+    for attempt in range(attempts):
+        resp = get_client().chat.completions.create(
+            model=current_model(),
+            messages=messages,
+            temperature=0.2,  # 诊断任务要稳定可复现，温度调低
+            response_format={"type": "json_object"},  # 要求模型输出 JSON 对象
+        )
+        content = resp.choices[0].message.content or ""
+        total = _sum_usage(total, _extract_usage(resp.usage))
+
+        try:
+            result = _parse_json(content)
+        except json.JSONDecodeError:
+            last_problem = "返回的内容不是合法 JSON"
+        else:
+            problems = schema_problems(result)
+            if not problems:
+                return result, total
+            last_problem = "；".join(problems)
+
+        last_excerpt = content.strip()[:200]
+        if attempt + 1 < attempts:
+            messages = [
+                *messages,
+                {"role": "assistant", "content": content[:2000]},
+                {"role": "user", "content": CORRECTION_PROMPT.format(problem=last_problem)},
+            ]
+
+    raise DiagnosisFormatError(
+        f"模型连续 {attempts} 次没有返回符合格式的诊断（{last_problem}）。"
+        f"它最后一次说的是：{last_excerpt or '（空）'}"
     )
-    content = resp.choices[0].message.content or ""
-    return _parse_json(content), _extract_usage(resp.usage)
 
 
 def diagnose(log: ParsedLog) -> dict:

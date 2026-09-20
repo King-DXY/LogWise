@@ -107,6 +107,11 @@ class DiagnosisCache:
         self._evictions = 0
 
     def get(self, key: str) -> str | None:
+        # 开关必须在这里生效 —— 之前只有 snapshot() 读了它，
+        # 于是 LOGWISE_CACHE_ENABLED=false 只是"显示成关闭"，实际照样缓存，
+        # 等于一个不起作用的配置项。
+        if not cache_enabled():
+            return None
         now = time.time()
         with self._lock:
             item = self._data.get(key)
@@ -126,6 +131,8 @@ class DiagnosisCache:
             return value
 
     def set(self, key: str, value: str) -> None:
+        if not cache_enabled():
+            return
         now = time.time()
         with self._lock:
             self._data[key] = (now + _ttl(), value)
@@ -135,8 +142,25 @@ class DiagnosisCache:
                 self._evictions += 1
 
     def clear(self) -> None:
+        """只清缓存数据，**保留**命中/未命中计数。
+
+        想连统计一起清（做对照实验）请用 ``reset()``。
+        """
         with self._lock:
             self._data.clear()
+
+    def reset(self) -> None:
+        """清空缓存数据 + 命中/未命中/淘汰计数。
+
+        ``/stats/reset`` 用的是这个 —— 它的返回消息说的是「统计与缓存已清零」，
+        而原来只调了 ``clear()``，缓存那几项计数其实没清，做对照实验时会看到
+        上一轮的 hits/misses 混在里面。
+        """
+        with self._lock:
+            self._data.clear()
+            self._hits = 0
+            self._misses = 0
+            self._evictions = 0
 
     def snapshot(self) -> dict:
         with self._lock:

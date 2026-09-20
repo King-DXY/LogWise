@@ -27,6 +27,8 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from app.apikey import read_api_key
+
 ROOT = Path(__file__).resolve().parent.parent
 INDEX_DIR = ROOT / "data" / "index"
 CACHE_PATH = INDEX_DIR / "embedding_cache.json"
@@ -79,8 +81,7 @@ def embedding_dimensions() -> int | None:
 
 def embedding_configured() -> bool:
     """是否已配置可用的向量化服务。未配置时 Dense 检索应被标记为不可用。"""
-    key = os.getenv("EMBEDDING_API_KEY", "").strip()
-    return bool(key) and key != "在这里填你的智谱Key"
+    return read_api_key("EMBEDDING_API_KEY") is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -101,7 +102,7 @@ def get_client():
         if _client is None:
             from openai import OpenAI  # 延迟导入，未用向量时不必加载
 
-            _client = OpenAI(api_key=os.getenv("EMBEDDING_API_KEY"), base_url=embedding_base_url())
+            _client = OpenAI(api_key=read_api_key("EMBEDDING_API_KEY"), base_url=embedding_base_url())
     return _client
 
 
@@ -141,11 +142,15 @@ def _save_cache() -> None:
     cache = _load_cache()
     with _cache_lock:
         INDEX_DIR.mkdir(parents=True, exist_ok=True)
-        CACHE_PATH.write_text(
-            json.dumps({"model": embedding_model(), "count": len(cache), "vectors": cache},
-                       ensure_ascii=False),
-            encoding="utf-8",
+        payload = json.dumps(
+            {"model": embedding_model(), "count": len(cache), "vectors": cache},
+            ensure_ascii=False,
         )
+        # 先写临时文件再原子替换。中途被打断（Ctrl+C、断电）也不会留下半截 JSON ——
+        # _load_cache 虽然能容忍坏文件，但那样等于白花了重新调用接口的钱。
+        tmp = CACHE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(payload, encoding="utf-8")
+        os.replace(tmp, CACHE_PATH)
         _cache_dirty = False
 
 
@@ -159,11 +164,17 @@ def cache_stats() -> dict:
 
 
 def reset_cache(memory_only: bool = True) -> None:
-    """测试用：清掉内存缓存（默认不动磁盘文件）。"""
+    """清掉向量缓存。
+
+    ``memory_only=True``（默认）只清内存，磁盘文件保留，下次还能复用；
+    ``False`` 会连磁盘文件一起删掉 —— ``build_index.py --force`` 走这条。
+    """
     global _cache, _cache_dirty
     with _cache_lock:
         _cache = None
         _cache_dirty = False
+        if not memory_only:
+            CACHE_PATH.unlink(missing_ok=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -176,6 +187,10 @@ def embed(texts: list[str]) -> list[list[float]]:
     """
     if not texts:
         return []
+
+    # _cache_dirty 只是记账（谁都没拿它做判断），但赋值前必须声明 global，
+    # 否则 Python 会把它当成局部变量，模块级的那个永远保持 False。
+    global _cache_dirty
 
     cache = _load_cache()
     keys = [_cache_key(t) for t in texts]
@@ -196,14 +211,28 @@ def embed(texts: list[str]) -> list[list[float]]:
             items = sorted(resp.data, key=lambda d: d.index)
             vectors.extend([list(d.embedding) for d in items])
 
-        global _cache_dirty
+        # 条数对不上说明服务端返回不完整。这时**绝不能**继续往下写缓存 ——
+        # 原来 zip() 会静默丢掉缺失的部分，最后在返回时抛一个裸 KeyError
+        # （用户看到的是 sha1 摘要，完全不知道发生了什么）。宁可明确失败。
+        if len(vectors) != len(pending):
+            raise EmbeddingUnavailable(
+                f"向量服务返回 {len(vectors)} 条，但请求了 {len(pending)} 条。"
+                "为避免写入不完整的缓存，本次结果已丢弃，请重试。"
+            )
+
         with _cache_lock:
             for i, vec in zip(missing_idx, vectors):
                 cache[keys[i]] = vec
             _cache_dirty = True
         _save_cache()
 
-    return [cache[k] for k in keys]
+    result: list[list[float]] = []
+    for k in keys:
+        vec = cache.get(k)
+        if vec is None:  # 理论上到不了这里，兜一下避免裸 KeyError
+            raise EmbeddingUnavailable("向量缓存出现缺失，请重试。")
+        result.append(vec)
+    return result
 
 
 def embed_one(text: str) -> list[float]:

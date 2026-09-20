@@ -128,6 +128,59 @@ class TestEmbed:
         assert stats["cached_vectors"] == 2
 
 
+class TestIncompleteResponse:
+    """服务端返回条数不足时的行为。
+
+    修复前：``zip(missing_idx, vectors)`` 会把缺失的静默丢掉，然后在返回时
+    ``cache[k]`` 抛一个**裸 KeyError**，key 是 sha1 摘要 ——
+    用户看到 ``KeyError: '72e041335a3c...'``，完全不知道发生了什么。
+    现在改成明确的 EmbeddingUnavailable，并且**不把半份结果写进缓存**。
+    """
+
+    @pytest.fixture
+    def short_response(self, fake_api, monkeypatch):
+        monkeypatch.setattr(
+            fake_api, "create",
+            lambda model, input, **kw: SimpleNamespace(  # noqa: A002
+                data=[SimpleNamespace(index=0, embedding=fake_vector("只有一条"))]
+            ),
+        )
+        return fake_api
+
+    def test_raises_readable_error(self, short_response):
+        with pytest.raises(embedding.EmbeddingUnavailable, match="请重试"):
+            embedding.embed(["甲", "乙", "丙"])
+
+    def test_never_caches_a_partial_result(self, short_response):
+        with pytest.raises(embedding.EmbeddingUnavailable):
+            embedding.embed(["甲", "乙"])
+        assert embedding.cache_stats()["cached_vectors"] == 0, (
+            "响应不完整时绝不能写缓存，否则以后一直拿着错的数据"
+        )
+
+
+class TestResetCache:
+    def test_memory_only_keeps_disk_file(self, fake_api):
+        embedding.embed(["甲"])
+        path = embedding.CACHE_PATH
+        assert path.exists()
+        embedding.reset_cache(memory_only=True)
+        assert path.exists(), "默认只清内存，磁盘缓存应保留（否则白花钱重算）"
+
+    def test_full_reset_deletes_disk_file(self, fake_api):
+        embedding.embed(["甲"])
+        path = embedding.CACHE_PATH
+        assert path.exists()
+        embedding.reset_cache(memory_only=False)
+        assert not path.exists(), "memory_only=False 应连磁盘文件一起删掉"
+
+    def test_save_leaves_no_temp_file(self, fake_api):
+        """保存用「临时文件 + 原子替换」，完成后不该残留 .tmp。"""
+        embedding.embed(["甲"])
+        leftovers = list(embedding.CACHE_PATH.parent.glob("*.tmp"))
+        assert not leftovers, f"不应残留临时文件: {leftovers}"
+
+
 class TestCosine:
     def test_identical_vectors_score_one(self):
         v = [0.1, 0.2, 0.3]

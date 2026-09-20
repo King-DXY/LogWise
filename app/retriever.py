@@ -229,7 +229,20 @@ class BM25Retriever(Retriever):
 
 
 class IndexNotBuiltError(RuntimeError):
-    """向量索引不存在或与知识库不匹配 —— 需要先跑 build_index.py。"""
+    """向量索引不存在或与知识库 / 当前配置不匹配 —— 需要先跑 build_index.py。"""
+
+
+def _configured_embedding_model() -> str:
+    """当前配置的 embedding 模型名；取不到就返回空串（表示跳过该校验）。
+
+    用延迟导入而不是模块级导入：没用到向量检索时不必加载 embedding 模块
+    （它会连带 import dotenv）。
+    """
+    try:
+        from app import embedding
+    except ImportError:
+        return ""
+    return embedding.embedding_model()
 
 
 class DenseRetriever(Retriever):
@@ -245,8 +258,12 @@ class DenseRetriever(Retriever):
     def __init__(self, cases: list[dict], vectors: list[list[float]]):
         if len(cases) != len(vectors):
             raise ValueError(f"案例数与向量数不匹配: {len(cases)} vs {len(vectors)}")
+        dims = {len(v) for v in vectors}
+        if len(dims) > 1:
+            raise ValueError(f"向量维度不一致: {sorted(dims)}，索引可能损坏，请重建")
         self._cases = cases
         self._vectors = vectors
+        self._dim = dims.pop() if dims else 0
         self._norms = [math.sqrt(sum(x * x for x in v)) or 1.0 for v in vectors]
 
     @property
@@ -280,6 +297,43 @@ class DenseRetriever(Retriever):
                 f"索引缺少 {len(missing)} 条案例的向量（例如 {missing[:3]}）。"
                 "知识库应该是改过了，请重新运行:  python build_index.py"
             )
+
+        # ------------------------------------------------------------------ #
+        # 校验索引与当前配置是否匹配
+        #
+        # 为什么必须在**加载阶段**拦下来：余弦相似度是 element-wise 的 zip 点积，
+        # 两边长度不一致时 ```zip`` 会**静默截断**到较短的那个 —— 不报错，
+        # 只是算出一个"看起来正常但实际错误"的分数。实测 4 维 query 对 8 维索引
+        # 会正常返回结果，完全没有提示。
+        #
+        # 触发场景很现实：改了 .env 里的 EMBEDDING_MODEL 或 EMBEDDING_DIMENSIONS
+        # 之后没重建索引。这里报错 → get_retriever() 降级回 BM25 并把原因写进
+        # /stats，比悄悄给出错误检索结果好得多。
+        # ------------------------------------------------------------------ #
+        dims = {len(v) for v in vectors}
+        if len(dims) != 1:
+            raise IndexNotBuiltError(
+                f"索引内向量维度不一致（{sorted(dims)}），文件可能损坏。"
+                "请重新运行:  python build_index.py"
+            )
+        actual_dim = dims.pop()
+
+        declared_dim = raw.get("dimensions")
+        if isinstance(declared_dim, int) and declared_dim != actual_dim:
+            raise IndexNotBuiltError(
+                f"索引声明的维度是 {declared_dim}，实际是 {actual_dim}，文件已损坏。"
+                "请重新运行:  python build_index.py"
+            )
+
+        stored_model = raw.get("model")
+        current_model = _configured_embedding_model()
+        if stored_model and current_model and stored_model != current_model:
+            raise IndexNotBuiltError(
+                f"索引是用 {stored_model} 建的，当前配置的模型是 {current_model}。"
+                "不同模型的向量空间不可比，换个模型必须重建索引：\n"
+                "    python build_index.py --force"
+            )
+
         return cls(cases, vectors)
 
     def size(self) -> int:
@@ -294,6 +348,13 @@ class DenseRetriever(Retriever):
             qv = embedding.embed_one(query)
         except Exception:
             # 向量服务抖动不该让整条诊断链路失败：返回空，让上层回退到词法结果
+            return []
+
+        # 最后一道防线：query 与索引维度不一致时，下面的 zip 点积会静默截断，
+        # 算出错误的相似度。加载阶段已校验过配置，能走到这里说明服务端返回的
+        # 维度与建索引时不同 —— 宁可不返回结果（上层会退化成只用词法结果），
+        # 也不要返回错的。
+        if self._dim and len(qv) != self._dim:
             return []
 
         qn = math.sqrt(sum(x * x for x in qv)) or 1.0
@@ -360,11 +421,17 @@ class HybridRetriever(Retriever):
 
         fused = rrf_fuse(rankings)
         ordered = sorted(fused.items(), key=lambda kv: (-kv[1], kv[0]))
-        return [
-            RetrievedCase(score=round(score, 6), case=self._by_id[doc_id])
-            for doc_id, score in ordered[:k]
-            if doc_id in self._by_id
-        ]
+        # 先过滤再截断。反过来的话（先 ordered[:k] 再过滤），遇到不在知识库里的
+        # doc_id 就会白白占掉名额，最终返回的条数少于 k。
+        picked: list[RetrievedCase] = []
+        for doc_id, score in ordered:
+            case = self._by_id.get(doc_id)
+            if case is None:
+                continue
+            picked.append(RetrievedCase(score=round(score, 6), case=case))
+            if len(picked) >= k:
+                break
+        return picked
 
 
 # --------------------------------------------------------------------------- #
@@ -414,7 +481,9 @@ def make_retriever(
 
 _retriever: Retriever | None = None
 _retriever_backend: str | None = None
+_retriever_path: str | None = None
 _fallback_reason: str = ""
+_kb_ok: bool = True
 
 
 def get_retriever(path: Path | str | None = None) -> Retriever:
@@ -424,20 +493,45 @@ def get_retriever(path: Path | str | None = None) -> Retriever:
     （``describe_backend()`` 会报出来）。理由很实际 ——
     向量服务没配好或索引没建，不该让整个诊断服务起不来。
     """
-    global _retriever, _retriever_backend, _fallback_reason
+    global _retriever, _retriever_backend, _retriever_path, _fallback_reason, _kb_ok
     kb_path = DEFAULT_KB_PATH if path is None else path
+    cache_id = str(kb_path)
     backend = current_backend()
-    if _retriever is not None and _retriever_backend == backend:
+    # 知识库路径也要进缓存键 —— 否则测试里换个路径拿到的还是上一次那个实例
+    if _retriever is not None and _retriever_backend == backend and _retriever_path == cache_id:
         return _retriever
 
     _fallback_reason = ""
+    _kb_ok = True
     try:
         _retriever = make_retriever(backend, kb_path)
         _retriever_backend = backend
     except Exception as exc:
         _fallback_reason = f"{type(exc).__name__}: {exc}"
-        _retriever = BM25Retriever.from_jsonl(kb_path)
-        _retriever_backend = BACKEND_BM25
+        try:
+            _retriever = BM25Retriever.from_jsonl(kb_path)
+            _retriever_backend = BACKEND_BM25
+        except Exception as fallback_exc:
+            # ------------------------------------------------------------------ #
+            # 连词法检索也起不来（知识库文件缺失或损坏）。
+            #
+            # 为什么还要再兜一层：原来只有一层 except，而它内部又调 from_jsonl
+            # 去读**同一个**读不到的文件 —— 于是异常直接穿出去。
+            # 后果很严重：/stats 会调 get_retriever().size()，整个接口 500。
+            # 实测就踩过：.dockerignore 排除了 data/，容器里没有知识库，
+            # 于是容器内的 /stats 直接挂掉。
+            #
+            # 用一个空知识库兜底：检索返回空结果，诊断照常工作（RAG 本来就默认关闭），
+            # 但服务不会因为一个可选功能的数据文件缺失而整体不可用。
+            # ------------------------------------------------------------------ #
+            _fallback_reason = (
+                f"{type(exc).__name__}: {exc}"
+                f"｜知识库不可用（{type(fallback_exc).__name__}: {fallback_exc}）"
+            )
+            _retriever = BM25Retriever([])
+            _retriever_backend = BACKEND_BM25
+            _kb_ok = False
+    _retriever_path = cache_id
     return _retriever
 
 
@@ -451,12 +545,17 @@ def describe_backend() -> dict:
         "degraded": bool(_fallback_reason),
         "reason": _fallback_reason,
         "knowledge_base_size": _retriever.size() if _retriever else 0,
+        # 单独给一个布尔：知识库文件读不到时，上面那层的降级也救不了，
+        # 会退化成一个空知识库（检索返回空）。这种情况必须一眼看得出来。
+        "knowledge_base_ok": _kb_ok,
     }
 
 
 def reset_retriever() -> None:
     """用于测试：清掉单例，强制下次重新加载。"""
-    global _retriever, _retriever_backend, _fallback_reason
+    global _retriever, _retriever_backend, _retriever_path, _fallback_reason, _kb_ok
     _retriever = None
     _retriever_backend = None
+    _retriever_path = None
     _fallback_reason = ""
+    _kb_ok = True

@@ -20,6 +20,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 from app import cache as cache_mod
 from app import context as context_mod
@@ -80,10 +81,16 @@ class TextRequest(BaseModel):
 # --------------------------------------------------------------------------- #
 # 基础接口
 # --------------------------------------------------------------------------- #
+# 接口契约版本。改了路由签名或响应结构就 +1 —— 前端拿它做「服务端是不是旧版」的握手。
+# 用 /health 而不是某个业务接口来做这件事，是因为它不计度量、也不受限流，
+# 前端每次刷新页面探测一次不会污染 /stats 的请求数，也不会吃掉限流额度。
+API_REVISION = "2"
+
+
 @app.get("/health")
 def health():
-    """健康检查（K8s 探针使用）。故意不加鉴权。"""
-    return {"status": "ok"}
+    """健康检查（K8s 探针使用）。故意不加鉴权、不计度量、不受限流。"""
+    return {"status": "ok", "api": API_REVISION}
 
 
 @app.get("/stats", dependencies=PROTECTED)
@@ -114,13 +121,20 @@ def context_preview(text: str):
 
     ⚠️ 日志较长时请用 POST 版，query string 有长度上限。
     """
-    return _context_payload(text)
+    started = time.perf_counter()
+    payload = _context_payload(text)
+    # 也要计入 /stats 的请求数 —— 否则"请求总数"漏掉这一类，口径不完整。
+    _record("/context", started)  # llm_call 默认 False
+    return payload
 
 
 @app.post("/context", dependencies=PROTECTED)
 def context_preview_post(req: TextRequest):
     """预览上下文聚合结果（POST 版，无长度限制）。"""
-    return _context_payload(req.text)
+    started = time.perf_counter()
+    payload = _context_payload(req.text)
+    _record("/context", started)
+    return payload
 
 
 def _context_payload(text: str) -> dict:
@@ -179,7 +193,7 @@ def stats_reset():
     不会被之前测试请求的累计值干扰。
     """
     metrics.store.reset()
-    cache_mod.cache.clear()
+    cache_mod.cache.reset()
     return {"status": "ok", "message": "统计与缓存已清零"}
 
 
@@ -235,7 +249,9 @@ def diagnose(req: DiagnoseRequest):
     except Exception as exc:  # 模型侧任何异常都不该让接口 500 裸奔
         error = f"{type(exc).__name__}: {exc}"
 
-    _record("/diagnose", started, usage=usage, error=error)
+    # llm_call=True：不管成功还是抛异常，这次是真的打到模型了。
+    # 但失败不产生 token，所以 cost 为 0，不会被计入 billable_calls。
+    _record("/diagnose", started, usage=usage, error=error, llm_call=True)
 
     if error:
         raise HTTPException(status_code=502, detail=f"模型调用失败：{error}")
@@ -260,17 +276,23 @@ async def diagnose_stream_get(text: str):
     ⚠️ 日志较长时请改用 POST 版：query string 有长度上限
     （实测约 32K 字符，再长会被 ASGI 服务器以 400 拒绝）。
     """
-    return _stream_response(text)
+    return await run_in_threadpool(_stream_response, text)
 
 
 @app.post("/diagnose/stream", dependencies=PROTECTED)
 async def diagnose_stream_post(req: TextRequest):
     """SSE 流式诊断（POST 版）。日志放在 JSON body 里，没有长度限制。"""
-    return _stream_response(req.text)
+    return await run_in_threadpool(_stream_response, req.text)
 
 
 def _stream_response(text: str) -> StreamingResponse:
-    """SSE 流式诊断：逐 token 返回诊断 JSON 文本。"""
+    """SSE 流式诊断：逐 token 返回诊断 JSON 文本。
+
+    ⚠️ 这个函数是**同步且可能阻塞**的：``_cache_key`` 为了算检索结果指纹会跑一次
+    检索，而后端是 dense/hybrid 时会发起 embedding 网络调用。
+    所以两个 async 端点都用 ``run_in_threadpool`` 调它 —— 直接在事件循环里调用
+    会阻塞整个服务，表现和当初踩过的「SSE 攒到最后一次性输出」是同一个症状。
+    """
     started = time.perf_counter()
 
     logs = parse_text(text)
@@ -327,6 +349,7 @@ def _stream_response(text: str) -> StreamingResponse:
                 usage=usage,
                 error=error,
                 tokens_estimated=estimated,
+                llm_call=True,  # 走到这里就说明真的发起过流式调用了
             )
         yield SSE_DONE
 
@@ -392,7 +415,15 @@ def _record(
     cache_hit: bool = False,
     error: str = "",
     tokens_estimated: bool = False,
+    llm_call: bool = False,
 ) -> None:
+    """写一条度量记录。
+
+    ``llm_call`` 由调用方显式传入，**不要按 endpoint 前缀推断** ——
+    缓存命中和"没解析到日志"走的都是 /diagnose，但它们一次模型都没调。
+    之前用 ``endpoint.startswith("/diagnose")`` 判断，结果 llm_calls 实际是
+    "diagnose 请求数"，指标名与含义不符。
+    """
     usage = usage or Usage()
     metrics.store.record(
         metrics.CallRecord(
@@ -402,7 +433,7 @@ def _record(
             cached_prompt_tokens=usage.cached_tokens,
             completion_tokens=usage.completion_tokens,
             cache_hit=cache_hit,
-            llm_call=endpoint.startswith("/diagnose"),
+            llm_call=llm_call,
             tokens_estimated=tokens_estimated,
             error=error,
         )

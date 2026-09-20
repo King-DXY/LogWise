@@ -99,6 +99,10 @@ function esc(s) {
 // ---- 服务端版本检测 ----
 // Python 代码在启动时载入内存，改了代码不重启就不生效；而网页文件是每次现读磁盘的。
 // 于是会出现「页面是新版、接口是旧版」这种很迷惑的状态 —— 这里主动把它识别出来讲清楚。
+//
+// 用 /health 做握手而不是某个业务接口：它不计度量、不受限流，
+// 每次刷新页面探测一次不会污染 /stats 的请求数，也不会吃掉限流额度。
+const EXPECTED_API = "2";
 const STALE_MSG = "服务端是旧版本，缺少这个接口。请关掉那个命令行窗口，重新双击 app\\run.py 后再试。";
 
 function isStale(status) {
@@ -111,12 +115,10 @@ function showStale() {
 
 async function checkServerVersion() {
   try {
-    const r = await fetch("/context", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: "version-check" }),
-    });
-    if (isStale(r.status)) showStale();
+    const r = await fetch("/health");
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.api !== EXPECTED_API) showStale();
   } catch (e) { /* 服务没起来时不在这里报错 */ }
 }
 

@@ -24,6 +24,7 @@ from app.retriever import (
     DenseRetriever,
     HybridRetriever,
     IndexNotBuiltError,
+    RetrievedCase,
     _NOISE_LINE,
     load_cases,
     make_retriever,
@@ -333,3 +334,164 @@ class TestBackendSelection:
             assert info["reason"], "降级原因要能报出来，否则用户不知道走的是哪条路"
         finally:
             reset_retriever()
+
+    def test_get_retriever_is_path_aware(self, tmp_path):
+        """换了知识库路径就该拿到新实例。
+
+        修复前单例只按 backend 缓存，忽略了 path —— 测试里换路径拿到的
+        还是上一次那个实例，很容易写出"以为在测 A 其实在测 B"的测试。
+        """
+        from app.retriever import get_retriever
+
+        tiny = tmp_path / "tiny.jsonl"
+        tiny.write_text(
+            json.dumps(
+                {"id": "only-01", "fault_group": "g", "fault_type": "t",
+                 "summary": "s", "log": "x", "diagnosis": {}},
+                ensure_ascii=False,
+            ) + "\n",
+            encoding="utf-8",
+        )
+        reset_retriever()
+        try:
+            default_one = get_retriever()
+            tiny_one = get_retriever(tiny)
+            assert tiny_one is not default_one
+            assert tiny_one.size() == 1
+        finally:
+            reset_retriever()
+
+
+class TestMissingKnowledgeBase:
+    """知识库文件读不到时，服务必须还能起来。
+
+    实测踩过：``.dockerignore`` 把 ``data/`` 整个排除了，容器里没有
+    ``data/fault_cases.jsonl``。原来 ``get_retriever`` 只有一层 ``except``，
+    而它的兜底分支又去读**同一个**读不到的文件 —— 异常直接穿出去。
+    后果是容器内的 ``/stats`` 直接 500（它会调 ``rag.describe()`` →
+    ``get_retriever().size()``）。
+
+    现在退化成一个空知识库：检索返回空结果，诊断照常工作，
+    但不会因为一个可选功能的数据文件缺失而整体不可用。
+    """
+
+    def test_degrades_to_empty_kb(self, tmp_path):
+        from app import retriever as ret
+
+        reset_retriever()
+        try:
+            r = ret.get_retriever(tmp_path / "不存在的知识库.jsonl")
+            assert isinstance(r, BM25Retriever)
+            assert r.size() == 0
+            assert r.search("任意查询") == [], "空知识库应返回空结果而不是抛异常"
+
+            info = ret.describe_backend()
+            assert info["knowledge_base_ok"] is False
+            assert "知识库不可用" in info["reason"]
+        finally:
+            reset_retriever()
+
+    def test_empty_kb_does_not_break_rag(self, tmp_path, monkeypatch):
+        """RAG 的注入端在空知识库下也要能正常工作（返回空参考案例）。
+
+        注意 ``rag.build_examples`` 内部调的是 ``get_retriever()``（不带路径），
+        所以这里要改的是 ``DEFAULT_KB_PATH`` 而不是传参 —— 这正是服务端的真实用法。
+        """
+        from app import rag
+        from app import retriever as ret
+
+        monkeypatch.setattr(ret, "DEFAULT_KB_PATH", tmp_path / "不存在的知识库.jsonl")
+        reset_retriever()
+        try:
+            examples, ids = rag.build_examples("测试日志", mode="dynamic")
+            assert examples == [] and ids == []
+        finally:
+            reset_retriever()
+
+
+class TestIndexValidation:
+    """索引与当前配置不匹配时必须报错，而不是算出错误的相似度。
+
+    余弦相似度是 element-wise 的 zip 点积：两边长度不一致时 zip 会
+    **静默截断到较短的那个** —— 不报错、正常返回结果，只是分数是错的。
+    实测 4 维 query 对 8 维索引会正常返回，完全没有提示。
+
+    真实触发场景：改了 .env 里的 EMBEDDING_MODEL 或 EMBEDDING_DIMENSIONS
+    之后忘了重建索引。
+    """
+
+    CASES = [
+        {"id": "a-01", "fault_group": "g", "fault_type": "t",
+         "summary": "s", "log": "x", "diagnosis": {}},
+        {"id": "b-01", "fault_group": "g", "fault_type": "t",
+         "summary": "s", "log": "y", "diagnosis": {}},
+    ]
+
+    def _write(self, tmp_path, payload: dict) -> Path:
+        p = tmp_path / "embeddings.json"
+        p.write_text(json.dumps(payload), encoding="utf-8")
+        return p
+
+    def test_declared_dimension_mismatch_raises(self, tmp_path):
+        p = self._write(tmp_path, {
+            "model": "embedding-3", "dimensions": 4, "count": 2,
+            "vectors": {"a-01": [0.0] * 8, "b-01": [0.0] * 8},
+        })
+        with pytest.raises(IndexNotBuiltError, match="损坏"):
+            DenseRetriever.from_index(self.CASES, path=p)
+
+    def test_ragged_vectors_raise(self, tmp_path):
+        p = self._write(tmp_path, {
+            "model": "embedding-3", "dimensions": 8, "count": 2,
+            "vectors": {"a-01": [0.0] * 8, "b-01": [0.0] * 4},
+        })
+        with pytest.raises(IndexNotBuiltError):
+            DenseRetriever.from_index(self.CASES, path=p)
+
+    def test_model_mismatch_raises(self, tmp_path, monkeypatch):
+        """换 embedding 模型必须重建索引 —— 不同模型的向量空间不可比。"""
+        monkeypatch.setenv("EMBEDDING_MODEL", "embedding-3")
+        p = self._write(tmp_path, {
+            "model": "某个旧模型", "dimensions": 8, "count": 2,
+            "vectors": {"a-01": [0.0] * 8, "b-01": [0.0] * 8},
+        })
+        with pytest.raises(IndexNotBuiltError, match="重建索引"):
+            DenseRetriever.from_index(self.CASES, path=p)
+
+    def test_query_dimension_mismatch_returns_empty(self, dense_retriever, monkeypatch):
+        """query 维度与索引不同时返回空，绝不算出错误的分数。"""
+        from app import embedding as emb
+
+        monkeypatch.setenv("EMBEDDING_API_KEY", "test-key")
+        assert dense_retriever._dim == 64          # fixture 用的是 64 维假向量
+        monkeypatch.setattr(emb, "embed_one", lambda text: [1.0] * 8)
+        assert dense_retriever.search("disk quota exceeded") == []
+
+
+class TestHybridTruncation:
+    def test_filtering_happens_before_truncation(self):
+        """不在知识库里的 doc_id 不该占掉返回名额。
+
+        修复前是先 ``ordered[:k]`` 再过滤，一旦混进无效 id，
+        最终返回的条数就会少于 k。
+        """
+        cases = load_cases(KB_PATH)
+        sparse = BM25Retriever(cases)
+
+        class PhantomDense:
+            """返回一批不在知识库里的 id，模拟后端与知识库不一致。"""
+
+            def search(self, query, k=3, exclude=None):
+                return [
+                    RetrievedCase(score=1.0, case={"id": f"ghost-{i}"})
+                    for i in range(5)
+                ]
+
+            def size(self) -> int:
+                return 0
+
+        hybrid = HybridRetriever(sparse, PhantomDense())
+        hits = hybrid.search("java.io.IOException: No space left on device", k=3)
+        assert len(hits) == 3, "应回落到 BM25 侧补足 k 条，而不是少给"
+        valid = {c["id"] for c in cases}
+        assert all(h.id in valid for h in hits)
