@@ -128,6 +128,13 @@ class CallRecord:
     #    "diagnose 请求数"，指标名与含义不符。现在由调用方显式传入。
     llm_call: bool = False
     error: str = ""
+    # ---- Agent 模式专属（非 Agent 请求全部保持默认值，不参与统计）----
+    # 加这些字段的原因：Agent 的行为特征（查不查工具、跑几轮）本身就是
+    # 要观测的指标，混在通用指标里看不出来。
+    agent: bool = False
+    agent_tool_calls: int = 0    # 本次调用工具的次数（0 = 模型直接回答）
+    agent_rounds: int = 0        # 决策轮数（含直接回答的 1 轮）
+    agent_forced: bool = False   # 是否因轮次上限被强制收尾
     ts: float = field(default_factory=time.time)
 
     @property
@@ -179,6 +186,12 @@ class MetricsStore:
         self._completion_tokens = 0
         self._cost = 0.0
         self._estimated_calls = 0
+        # Agent 聚合：只统计 agent=True 的记录
+        self._agent_calls = 0
+        self._agent_tool_calls = 0
+        self._agent_rounds = 0
+        self._agent_forced = 0
+        self._agent_direct_answers = 0  # 一次工具都没调的 Agent 请求
 
     def record(self, rec: CallRecord) -> None:
         with self._lock:
@@ -196,6 +209,14 @@ class MetricsStore:
                 self._billable_calls += 1
             if rec.tokens_estimated:
                 self._estimated_calls += 1
+            if rec.agent:
+                self._agent_calls += 1
+                self._agent_tool_calls += rec.agent_tool_calls
+                self._agent_rounds += rec.agent_rounds
+                if rec.agent_forced:
+                    self._agent_forced += 1
+                if rec.agent_tool_calls == 0 and not rec.error:
+                    self._agent_direct_answers += 1
             self._prompt_tokens += rec.prompt_tokens
             self._cached_prompt_tokens += rec.cached_prompt_tokens
             self._completion_tokens += rec.completion_tokens
@@ -263,7 +284,26 @@ class MetricsStore:
                 "avg_per_billable_call": round(cost / billable, 6) if billable else 0.0,
                 "currency": "CNY",
             },
+            "agent": self._agent_summary(),
             "recent": recent,
+        }
+
+    def _agent_summary(self) -> dict[str, Any]:
+        """Agent 模式的行为特征 —— 查不查工具、跑几轮，本身就是核心观测对象。
+
+        ⚠️ 调用方必须已持有 self._lock（在 summary 里被调用）。
+        """
+        calls = self._agent_calls
+        if not calls:
+            return {"requests": 0}
+        return {
+            "requests": calls,
+            "tool_call_rate": round((calls - self._agent_direct_answers) / calls, 4),
+            "direct_answer_rate": round(self._agent_direct_answers / calls, 4),
+            "avg_tool_calls": round(self._agent_tool_calls / calls, 2),
+            "avg_rounds": round(self._agent_rounds / calls, 2),
+            "forced_answer_count": self._agent_forced,
+            "note": "direct_answer_rate 高说明模型判断故障是通识、无需检索 —— 与 RAG 实验结论互为印证",
         }
 
     def reset(self) -> None:
@@ -281,6 +321,11 @@ class MetricsStore:
             self._completion_tokens = 0
             self._cost = 0.0
             self._estimated_calls = 0
+            self._agent_calls = 0
+            self._agent_tool_calls = 0
+            self._agent_rounds = 0
+            self._agent_forced = 0
+            self._agent_direct_answers = 0
 
 
 # 全局单例：整个进程共用一个

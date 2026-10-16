@@ -9,7 +9,11 @@
       "id": "res-01",
       "category": "资源耗尽",
       "expected": "磁盘配额超限（用户写配额用尽，不是分区写满）",
-      "keywords": ["配额", "quota", "EDQUOT"],
+      "keywords": [
+        "配额",
+        "quota",
+        "EDQUOT"
+      ],
       "log_lines": [
         "2026-08-03 11:22:41,308 ERROR [metrics-writer] com.example.metrics.MetricsWriter - 日志文件滚动失败",
         "java.io.IOException: Disk quota exceeded",
@@ -23,7 +27,12 @@
       "id": "res-02",
       "category": "资源耗尽",
       "expected": "JVM 堆内存溢出",
-      "keywords": ["内存", "堆", "OutOfMemory", "heap"],
+      "keywords": [
+        "内存",
+        "堆",
+        "OutOfMemory",
+        "heap"
+      ],
       "log_lines": [
         "2026-08-04 02:15:09,776 ERROR [scheduler-2] com.example.batch.BatchProcessor - 批量任务中断",
         "java.lang.OutOfMemoryError: Java heap space",
@@ -35,7 +44,12 @@
       "id": "res-03",
       "category": "资源耗尽",
       "expected": "文件句柄耗尽",
-      "keywords": ["句柄", "描述符", "Too many open files", "打开文件"],
+      "keywords": [
+        "句柄",
+        "描述符",
+        "Too many open files",
+        "打开文件"
+      ],
       "log_lines": [
         "2026-08-05 09:41:22,105 ERROR [http-nio-8080-exec-5] com.example.file.FileService - 读取文件失败",
         "java.io.FileNotFoundException: /data/upload/tmp/8821.part (Too many open files)",
@@ -47,7 +61,12 @@
       "id": "res-04",
       "category": "资源耗尽",
       "expected": "线程池队列打满触发拒绝策略",
-      "keywords": ["线程池", "队列", "拒绝", "Rejected"],
+      "keywords": [
+        "线程池",
+        "队列",
+        "拒绝",
+        "Rejected"
+      ],
       "log_lines": [
         "2026-08-06 14:03:55,412 ERROR [http-nio-8080-exec-9] com.example.job.JobController - 提交任务失败",
         "java.util.concurrent.RejectedExecutionException: Task FutureTask@4f2a1c rejected from ThreadPoolExecutor@1b6d7a[Running, pool size = 200, active threads = 200, queued tasks = 1000, completed tasks = 48213]",
@@ -59,7 +78,11 @@
       "id": "dep-01",
       "category": "依赖服务",
       "expected": "数据库连接数达到上限",
-      "keywords": ["Too many connections", "连接数", "连接上限"],
+      "keywords": [
+        "Too many connections",
+        "连接数",
+        "连接上限"
+      ],
       "log_lines": [
         "2026-08-07 10:18:33,901 ERROR [http-nio-8080-exec-3] com.example.user.UserRepository - 查询用户失败",
         "java.sql.SQLNonTransientConnectionException: Data source rejected establishment of connection, message from server: \"Too many connections\"",
@@ -72,7 +95,11 @@
       "id": "dep-02",
       "category": "依赖服务",
       "expected": "Kafka 消费组重平衡失败",
-      "keywords": ["rebalance", "重平衡", "消费组"],
+      "keywords": [
+        "rebalance",
+        "重平衡",
+        "消费组"
+      ],
       "log_lines": [
         "2026-08-08 16:55:12,660 WARN [order-consumer-1] org.apache.kafka.clients.consumer.internals.ConsumerCoordinator - Rebalance failed",
         "2026-08-08 16:55:14,003 ERROR [order-consumer-1] com.example.order.OrderConsumer - 消费消息异常",
@@ -85,7 +112,12 @@
       "id": "dep-03",
       "category": "依赖服务",
       "expected": "消息队列 broker 强制断开连接",
-      "keywords": ["RabbitMQ", "broker", "消息队列", "CONNECTION_FORCED"],
+      "keywords": [
+        "RabbitMQ",
+        "broker",
+        "消息队列",
+        "CONNECTION_FORCED"
+      ],
       "log_lines": [
         "2026-08-09 08:30:44,219 ERROR [amqp-client-heartbeat] com.example.mq.MessagePublisher - 消息发送失败",
         "com.rabbitmq.client.ShutdownSignalException: connection error; protocol method: #method<connection.close>(reply-code=320, reply-text=CONNECTION_FORCED - broker forced connection closure with reason 'shutdown')",
@@ -97,7 +129,12 @@
       "id": "dep-04",
       "category": "依赖服务",
       "expected": "上游依赖服务不可用返回 503",
-      "keywords": ["503", "上游", "依赖服务", "不可用"],
+      "keywords": [
+        "503",
+        "上游",
+        "依赖服务",
+        "不可用"
+      ],
       "log_lines": [
         "2026-08-10 13:07:19,552 ERROR [http-nio-8080-exec-2] com.example.inventory.InventoryClient - 调用库存服务失败",
         "org.springframework.web.client.HttpServerErrorException$ServiceUnavailable: 503 Service Unavailable",
@@ -109,7 +146,11 @@
       "id": "bug-01",
       "category": "代码缺陷",
       "expected": "数组下标越界",
-      "keywords": ["越界", "数组", "ArrayIndexOutOfBounds"],
+      "keywords": [
+        "越界",
+        "数组",
+        "ArrayIndexOutOfBounds"
+      ],
       "log_lines": [
         "2026-08-11 11:45:02,338 ERROR [http-nio-8080-exec-7] com.example.report.ReportParser - 解析报表失败",
         "java.lang.ArrayIndexOutOfBoundsException: Index 12 out of bounds for length 10",
@@ -121,7 +162,11 @@
       "id": "bug-02",
       "category": "代码缺陷",
       "expected": "类型强制转换失败",
-      "keywords": ["类型", "转换", "ClassCast"],
+      "keywords": [
+        "类型",
+        "转换",
+        "ClassCast"
+      ],
       "log_lines": [
         "2026-08-12 15:20:41,900 ERROR [http-nio-8080-exec-4] com.example.config.ConfigLoader - 加载配置失败",
         "java.lang.ClassCastException: class java.lang.String cannot be cast to class java.lang.Integer",
@@ -133,7 +178,10 @@
       "id": "bug-03",
       "category": "代码缺陷",
       "expected": "多线程死锁",
-      "keywords": ["死锁", "deadlock"],
+      "keywords": [
+        "死锁",
+        "deadlock"
+      ],
       "log_lines": [
         "2026-08-13 20:12:05,771 ERROR [http-nio-8080-exec-6] com.example.order.OrderService - 订单处理超时",
         "java.lang.IllegalMonitorStateException: Found one Java-level deadlock:",
@@ -146,7 +194,12 @@
       "id": "bug-04",
       "category": "代码缺陷",
       "expected": "遍历集合时并发修改（未使用迭代器安全删除）",
-      "keywords": ["并发修改", "ConcurrentModification", "迭代器", "遍历"],
+      "keywords": [
+        "并发修改",
+        "ConcurrentModification",
+        "迭代器",
+        "遍历"
+      ],
       "log_lines": [
         "2026-08-14 09:55:18,446 ERROR [batch-worker-3] com.example.sync.DataSyncTask - 同步失败",
         "java.util.ConcurrentModificationException",
@@ -160,7 +213,12 @@
       "id": "cfg-01",
       "category": "配置问题",
       "expected": "HTTPS 证书过期或校验失败",
-      "keywords": ["证书", "certificate", "SSL", "PKIX"],
+      "keywords": [
+        "证书",
+        "certificate",
+        "SSL",
+        "PKIX"
+      ],
       "log_lines": [
         "2026-08-15 07:00:03,120 ERROR [http-nio-8080-exec-1] com.example.pay.PayClient - 调用支付网关失败",
         "javax.net.ssl.SSLHandshakeException: PKIX path validation failed: java.security.cert.CertPathValidatorException: validity check failed",
@@ -172,7 +230,12 @@
       "id": "cfg-02",
       "category": "配置问题",
       "expected": "监听端口已被占用",
-      "keywords": ["端口", "占用", "Address already in use", "BindException"],
+      "keywords": [
+        "端口",
+        "占用",
+        "Address already in use",
+        "BindException"
+      ],
       "log_lines": [
         "2026-08-16 08:00:00,512 ERROR [main] com.example.Application - 应用启动失败",
         "java.net.BindException: Address already in use: bind",
@@ -184,7 +247,13 @@
       "id": "cfg-03",
       "category": "配置问题",
       "expected": "配置文件 YAML 语法错误（第 42 行缺少冒号）导致启动失败",
-      "keywords": ["YAML", "语法", "冒号", "配置文件", "解析"],
+      "keywords": [
+        "YAML",
+        "语法",
+        "冒号",
+        "配置文件",
+        "解析"
+      ],
       "log_lines": [
         "2026-08-17 08:00:01,887 ERROR [main] com.example.Application - 加载配置文件失败",
         "org.yaml.snakeyaml.scanner.ScannerException: while scanning a simple key at line 42, column 3: could not find expected ':'",
@@ -197,7 +266,13 @@
       "id": "net-01",
       "category": "网络问题",
       "expected": "域名解析失败",
-      "keywords": ["DNS", "解析", "UnknownHost", "域名", "主机名"],
+      "keywords": [
+        "DNS",
+        "解析",
+        "UnknownHost",
+        "域名",
+        "主机名"
+      ],
       "log_lines": [
         "2026-08-18 12:33:27,004 ERROR [http-nio-8080-exec-8] com.example.notify.SmsClient - 发送短信失败",
         "java.net.UnknownHostException: sms-gateway.internal",
@@ -209,7 +284,12 @@
       "id": "net-02",
       "category": "网络问题",
       "expected": "TCP 连接被对端重置",
-      "keywords": ["重置", "reset", "连接中断", "Connection reset"],
+      "keywords": [
+        "重置",
+        "reset",
+        "连接中断",
+        "Connection reset"
+      ],
       "log_lines": [
         "2026-08-19 18:44:51,233 ERROR [http-nio-8080-exec-2] com.example.upstream.UpstreamClient - 请求上游失败",
         "java.net.SocketException: Connection reset by peer",
@@ -221,7 +301,12 @@
       "id": "net-03",
       "category": "网络问题",
       "expected": "上游响应过慢导致读超时",
-      "keywords": ["超时", "timeout", "响应慢", "上游"],
+      "keywords": [
+        "超时",
+        "timeout",
+        "响应慢",
+        "上游"
+      ],
       "log_lines": [
         "2026-08-20 21:10:09,668 WARN [http-nio-8080-exec-3] com.example.upstream.UpstreamClient - 请求耗时 4820ms，接近超时阈值",
         "2026-08-20 21:10:12,115 ERROR [http-nio-8080-exec-3] com.example.order.OrderFacade - 下单失败",
@@ -235,7 +320,11 @@
       "id": "os-01",
       "category": "环境与数据",
       "expected": "文件系统权限不足",
-      "keywords": ["权限", "Permission denied", "无权"],
+      "keywords": [
+        "权限",
+        "Permission denied",
+        "无权"
+      ],
       "log_lines": [
         "2026-08-21 10:02:44,190 ERROR [batch-worker-1] com.example.backup.BackupTask - 备份失败",
         "java.io.FileNotFoundException: /var/backup/db-20260821.sql.gz (Permission denied)",
@@ -247,7 +336,12 @@
       "id": "os-02",
       "category": "环境与数据",
       "expected": "唯一键冲突（数据重复）",
-      "keywords": ["唯一", "重复", "Duplicate", "约束"],
+      "keywords": [
+        "唯一",
+        "重复",
+        "Duplicate",
+        "约束"
+      ],
       "log_lines": [
         "2026-08-22 11:26:37,541 ERROR [http-nio-8080-exec-5] com.example.user.UserService - 注册失败",
         "org.springframework.dao.DuplicateKeyException: PreparedStatementCallback; SQL [INSERT INTO t_user(phone, name) VALUES (?, ?)]; Duplicate entry '13800138000' for key 'uk_phone'",
@@ -260,7 +354,13 @@
       "difficulty": "tricky",
       "category": "根因辨析",
       "expected": "数据库进入只读模式（主从切换），不是数据本身违规",
-      "keywords": ["只读", "read-only", "主从", "故障转移", "从库"],
+      "keywords": [
+        "只读",
+        "read-only",
+        "主从",
+        "故障转移",
+        "从库"
+      ],
       "log_lines": [
         "2026-09-01 14:22:08,331 ERROR [http-nio-8080-exec-4] com.example.order.OrderRepository - 订单写入失败",
         "org.springframework.dao.DataIntegrityViolationException: could not execute statement",
@@ -275,7 +375,10 @@
       "difficulty": "tricky",
       "category": "根因辨析",
       "expected": "数据库死锁，而非普通的加锁失败",
-      "keywords": ["死锁", "deadlock"],
+      "keywords": [
+        "死锁",
+        "deadlock"
+      ],
       "log_lines": [
         "2026-09-03 10:05:31,772 ERROR [http-nio-8080-exec-1] com.example.stock.StockService - 扣减库存失败",
         "org.springframework.dao.CannotAcquireLockException: could not execute statement",
@@ -289,7 +392,13 @@
       "difficulty": "tricky",
       "category": "根因辨析",
       "expected": "递归缺少终止条件导致无限递归，而非单纯的堆不够用",
-      "keywords": ["递归", "终止条件", "死循环", "无限", "重复调用"],
+      "keywords": [
+        "递归",
+        "终止条件",
+        "死循环",
+        "无限",
+        "重复调用"
+      ],
       "log_lines": [
         "2026-09-04 08:17:52,090 ERROR [worker-2] com.example.tree.TreeWalker - 遍历组织树失败",
         "java.lang.OutOfMemoryError: Java heap space",
@@ -304,7 +413,14 @@
       "difficulty": "tricky",
       "category": "根因辨析",
       "expected": "应用上下文已关闭，通常发生在停机或重启过程中",
-      "keywords": ["关闭", "停机", "重启", "上下文", "ApplicationContext", "优雅退出"],
+      "keywords": [
+        "关闭",
+        "停机",
+        "重启",
+        "上下文",
+        "ApplicationContext",
+        "优雅退出"
+      ],
       "log_lines": [
         "2026-09-05 22:10:03,441 ERROR [http-nio-8080-exec-6] com.example.notify.PushService - 推送失败",
         "java.lang.IllegalStateException: The ApplicationContext has been closed already",
@@ -372,7 +488,13 @@
       "difficulty": "multi",
       "category": "多日志连锁",
       "expected": "Pod 因节点内存压力被驱逐（真因在 WARN 行，第一条 ERROR 只看到连接被拒）",
-      "keywords": ["驱逐", "Evicted", "内存压力", "节点内存", "low on resource"],
+      "keywords": [
+        "驱逐",
+        "Evicted",
+        "内存压力",
+        "节点内存",
+        "low on resource"
+      ],
       "log_lines": [
         "2026-09-10 23:15:01,220 WARN  [node-agent] kubelet - Pod order-service-7f9c4d 被驱逐：The node was low on resource: memory. Threshold quantity: 100Mi",
         "2026-09-10 23:15:04,881 ERROR [api-gateway] com.example.gateway.OrderClient - 调用订单服务失败: connection refused",
@@ -386,7 +508,13 @@
       "difficulty": "multi",
       "category": "多日志连锁",
       "expected": "未走索引的慢查询占满连接池（第一条 ERROR 只看到连接池取不到连接）",
-      "keywords": ["慢查询", "索引", "慢 SQL", "慢sql", "全表扫描"],
+      "keywords": [
+        "慢查询",
+        "索引",
+        "慢 SQL",
+        "慢sql",
+        "全表扫描"
+      ],
       "log_lines": [
         "2026-09-11 10:02:11,004 WARN  [db-monitor] com.example.monitor.SlowQueryLogger - 检测到慢查询 12.4s: SELECT * FROM t_order WHERE status = ?",
         "2026-09-11 10:02:15,660 WARN  [db-monitor] com.example.monitor.SlowQueryLogger - 检测到慢查询 11.8s: SELECT * FROM t_order WHERE status = ?",
@@ -400,7 +528,13 @@
       "difficulty": "multi",
       "category": "多日志连锁",
       "expected": "证书自动续期任务失败导致证书过期（第一条 ERROR 只看到 TLS 握手失败）",
-      "keywords": ["续期", "续签", "ACME", "自动续", "renew"],
+      "keywords": [
+        "续期",
+        "续签",
+        "ACME",
+        "自动续",
+        "renew"
+      ],
       "log_lines": [
         "2026-09-12 06:00:02,331 WARN  [cert-renew] com.example.cert.CertRenewJob - 证书续期失败: ACME challenge 校验超时，当前证书将于 3 天后过期",
         "2026-09-12 09:14:55,702 ERROR [http-nio-8080-exec-2] com.example.pay.PayClient - 调用支付网关失败",
@@ -414,7 +548,14 @@
       "difficulty": "multi",
       "category": "多日志连锁",
       "expected": "上游服务发版做了接口重构（真因在 INFO 行，第一条 ERROR 只看到 404）",
-      "keywords": ["发布", "发版", "升级", "接口重构", "不兼容", "v3.0.0"],
+      "keywords": [
+        "发布",
+        "发版",
+        "升级",
+        "接口重构",
+        "不兼容",
+        "v3.0.0"
+      ],
       "log_lines": [
         "2026-09-13 14:00:03,110 INFO  [deploy] com.example.deploy.ReleaseNotifier - 会员服务发布完成，版本 v2.4.0 -> v3.0.0（含接口重构）",
         "2026-09-13 14:05:41,772 ERROR [http-nio-8080-exec-8] com.example.gateway.MemberClient - 调用会员服务失败",
@@ -428,7 +569,13 @@
       "difficulty": "multi",
       "category": "多日志连锁",
       "expected": "本地磁盘写满导致 API 大面积 503（真因在最后的 WARN）",
-      "keywords": ["磁盘", "空间", "使用率", "No space", "/data"],
+      "keywords": [
+        "磁盘",
+        "空间",
+        "使用率",
+        "No space",
+        "/data"
+      ],
       "log_lines": [
         "2026-09-14 03:20:11,220 ERROR [api] com.example.api.ApiController - 请求处理失败: 503 Service Unavailable",
         "\tat com.example.api.ApiController.handle(ApiController.java:88)",
@@ -441,7 +588,13 @@
       "difficulty": "multi",
       "category": "多日志连锁",
       "expected": "MySQL 主从切换导致连接中断（第一条 ERROR 只看到连接池超时）",
-      "keywords": ["主从", "切换", "故障转移", "failover", "master"],
+      "keywords": [
+        "主从",
+        "切换",
+        "故障转移",
+        "failover",
+        "master"
+      ],
       "log_lines": [
         "2026-09-15 02:11:03,441 ERROR [http-nio-8080-exec-1] com.example.dao.OrderDao - 查询订单失败",
         "java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 30000ms",
@@ -455,7 +608,13 @@
       "difficulty": "noise",
       "category": "长日志噪音",
       "expected": "真因是 4 条之外的 INFO（动态配置推送把权限模式改成了 strict）—— 考验窗口 K 是否够大",
-      "keywords": ["动态配置", "配置推送", "配置中心", "ConfigListener", "推送变更"],
+      "keywords": [
+        "动态配置",
+        "配置推送",
+        "配置中心",
+        "ConfigListener",
+        "推送变更"
+      ],
       "log_lines": [
         "2026-09-20 10:00:00,100 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
         "2026-09-20 10:00:01,200 INFO  [metrics] com.example.metrics.Reporter - 指标上报成功",
@@ -476,7 +635,13 @@
       "difficulty": "noise",
       "category": "长日志噪音",
       "expected": "真因是 6 条之外的 INFO（风控服务灰度发布改了接口路径）—— 窗口 K 要 ≥6 才看得到",
-      "keywords": ["灰度", "灰度发布", "发版", "接口变更", "v2"],
+      "keywords": [
+        "灰度",
+        "灰度发布",
+        "发版",
+        "接口变更",
+        "v2"
+      ],
       "log_lines": [
         "2026-09-21 00:00:00,100 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
         "2026-09-21 00:00:01,200 INFO  [metrics] com.example.metrics.Reporter - 指标上报成功",
@@ -499,7 +664,13 @@
       "difficulty": "noise",
       "category": "长日志噪音",
       "expected": "真因 WARN 与锚点之间夹了 10 条无关告警 —— 上限 M 要 ≥12 才留得住真因",
-      "keywords": ["锁定", "文件锁", "积压", "外部进程", "StockStore"],
+      "keywords": [
+        "锁定",
+        "文件锁",
+        "积压",
+        "外部进程",
+        "StockStore"
+      ],
       "log_lines": [
         "2026-09-22 14:00:00,100 ERROR [order] com.example.order.StockClient - 下单失败: 库存服务响应异常",
         "java.util.concurrent.TimeoutException: 等待库存服务响应超时 3000ms",
@@ -527,7 +698,13 @@
       "difficulty": "noise",
       "category": "长日志噪音",
       "expected": "真因 WARN 与前夹了 18 条无关告警 —— 只有上限 M ≥20 才留得住真因",
-      "keywords": ["锁定", "文件锁", "积压", "外部进程", "StockStore"],
+      "keywords": [
+        "锁定",
+        "文件锁",
+        "积压",
+        "外部进程",
+        "StockStore"
+      ],
       "log_lines": [
         "2026-09-23 09:00:00,100 ERROR [order] com.example.order.StockClient - 下单失败: 库存服务响应异常",
         "java.util.concurrent.TimeoutException: 等待库存服务响应超时 3000ms",
@@ -556,6 +733,46 @@
         "2026-09-23 09:00:21,200 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
         "2026-09-23 09:00:22,300 INFO  [health] com.example.health.HealthChecker - 健康检查通过",
         "2026-09-23 09:00:23,400 WARN  [stock] com.example.stock.StockStore - 库存数据文件被外部进程锁定，写入队列已积压 3860 条"
+      ]
+    },
+    {
+      "id": "agent-ns",
+      "category": "私有错误码",
+      "expected": "命名服务配额耗尽（NS-1042）",
+      "keywords": [
+        "配额"
+      ],
+      "log_lines": [
+        "2026-10-01 09:31:07,441 ERROR [core-svc] com.example.ns.Worker - 请求被拒绝",
+        "com.example.ns.NsException: [NS-1042] rejected: tenant=user-profile",
+        "\tat com.example.ns.Worker.handle(Worker.java:52)"
+      ]
+    },
+    {
+      "id": "agent-idx",
+      "category": "私有错误码",
+      "expected": "搜索索引段损坏（IDX-3801）",
+      "keywords": [
+        "索引段"
+      ],
+      "log_lines": [
+        "2026-10-02 03:05:12,900 ERROR [idx-worker] com.example.search.Loader - 任务失败",
+        "com.example.search.IndexException: [IDX-3801] validation error, target=seg_20261001_0300",
+        "\tat com.example.search.Loader.verify(Loader.java:143)",
+        "2026-10-02 03:05:13,014 WARN  [idx-worker] com.example.search.Loader - 跳过该对象，继续处理"
+      ]
+    },
+    {
+      "id": "agent-sched",
+      "category": "私有错误码",
+      "expected": "调度器任务租约丢失（SCH-7788）",
+      "keywords": [
+        "租约"
+      ],
+      "log_lines": [
+        "2026-10-03 14:22:31,118 ERROR [scheduler] com.example.sched.Manager - 操作未完成",
+        "com.example.sched.SchedException: [SCH-7788] state conflict, job=hourly-report, holder=node-7, fence=4416",
+        "\tat com.example.sched.Manager.renew(Manager.java:76)"
       ]
     }
   ]

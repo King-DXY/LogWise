@@ -84,7 +84,7 @@ class TextRequest(BaseModel):
 # 接口契约版本。改了路由签名或响应结构就 +1 —— 前端拿它做「服务端是不是旧版」的握手。
 # 用 /health 而不是某个业务接口来做这件事，是因为它不计度量、也不受限流，
 # 前端每次刷新页面探测一次不会污染 /stats 的请求数，也不会吃掉限流额度。
-API_REVISION = "2"
+API_REVISION = "3"
 
 
 @app.get("/health")
@@ -267,6 +267,99 @@ def diagnose(req: DiagnoseRequest):
 
 
 # --------------------------------------------------------------------------- #
+# 诊断（Agent 模式：模型自主决定是否调用工具）
+# --------------------------------------------------------------------------- #
+@app.post("/diagnose/agent", dependencies=PROTECTED)
+def diagnose_agent(req: DiagnoseRequest):
+    """Agent 模式诊断：解析 + 聚合后，由模型自主决定查不查工具。
+
+    与 ``/diagnose`` 的区别只在决策权：老接口的检不检索由代码写死，
+    这里交给模型（Function Calling）。返回里带 ``trace`` ——
+    每轮的决策与工具调用记录，这是 Agent 可观测性的最小实现。
+
+    缓存键用 AGENT_PROMPT_VERSION 而非 PROMPT_VERSION：
+    两套 Prompt 独立演进，缓存互不干扰。
+    """
+    from app.agent import AGENT_PROMPT_VERSION, run_agent
+
+    started = time.perf_counter()
+
+    logs = parse_text(req.text)
+    if not logs:
+        _record("/diagnose/agent", started, error=NO_LOG_MSG)
+        return {"error": NO_LOG_MSG}
+
+    target = _pick_target(logs)
+    context = build_context(logs)
+    key = cache_mod.make_key(
+        req.text,
+        model=current_model(),
+        prompt_version=AGENT_PROMPT_VERSION,
+        context_signature=context.cache_signature(),
+        rag_signature="agent",
+    )
+
+    cached_text = cache_mod.cache.get(key)
+    if cached_text is not None:
+        _record("/diagnose/agent", started, cache_hit=True)
+        return {
+            "log": target.__dict__,
+            "context": describe(context),
+            **json.loads(cached_text),
+            "cached": True,
+        }
+
+    error = ""
+    result: dict = {}
+    trace: dict = {}
+    usage = Usage()
+    try:
+        result, usage, trace_obj = run_agent(context.logs)
+        trace = trace_obj.as_dict()
+    except Exception as exc:  # 与 /diagnose 对齐：模型侧异常不让接口 500 裸奔
+        error = f"{type(exc).__name__}: {exc}"
+
+    _record(
+        "/diagnose/agent",
+        started,
+        usage=usage,
+        error=error,
+        llm_call=True,
+        agent_tool_calls=trace.get("tool_calls_total", 0),
+        agent_rounds=len(trace.get("rounds", [])),
+        agent_forced=trace.get("forced_answer", False),
+    )
+
+    if error:
+        raise HTTPException(status_code=502, detail=f"模型调用失败：{error}")
+
+    # 用量与成本随响应返回 —— 「每次调用花了多少钱」是这个项目的核心叙事，
+    # 只在 /stats 里看聚合值不够直观，单次请求就该能看到。
+    cost = (
+        usage.uncached_prompt_tokens / 1_000_000 * metrics.price_input()
+        + usage.cached_tokens / 1_000_000 * metrics.price_input_cached()
+        + usage.completion_tokens / 1_000_000 * metrics.price_output()
+    )
+    payload = {
+        "diagnosis": result,
+        "trace": trace,
+        "usage": {
+            "prompt_tokens": usage.prompt_tokens,
+            "cached_tokens": usage.cached_tokens,
+            "completion_tokens": usage.completion_tokens,
+            "cost_yuan": round(cost, 6),
+        },
+    }
+    cache_mod.cache.set(key, json.dumps(payload, ensure_ascii=False))
+    return {
+        "log": target.__dict__,
+        "context": describe(context),
+        **payload,
+        "cached": False,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # 诊断（SSE 流式）
 # --------------------------------------------------------------------------- #
 @app.get("/diagnose/stream", dependencies=PROTECTED)
@@ -416,6 +509,9 @@ def _record(
     error: str = "",
     tokens_estimated: bool = False,
     llm_call: bool = False,
+    agent_tool_calls: int = 0,
+    agent_rounds: int = 0,
+    agent_forced: bool = False,
 ) -> None:
     """写一条度量记录。
 
@@ -423,6 +519,10 @@ def _record(
     缓存命中和"没解析到日志"走的都是 /diagnose，但它们一次模型都没调。
     之前用 ``endpoint.startswith("/diagnose")`` 判断，结果 llm_calls 实际是
     "diagnose 请求数"，指标名与含义不符。
+
+    ``agent_*`` 三个字段只有 Agent 端点传：MetricsStore 靠 ``agent_tool_calls
+    or agent_rounds`` 之外还得有 agent 标记 —— 这里用 endpoint 判定 agent 身份
+    是唯一例外，因为 agent 字段本来就是端点私有的。
     """
     usage = usage or Usage()
     metrics.store.record(
@@ -436,6 +536,10 @@ def _record(
             llm_call=llm_call,
             tokens_estimated=tokens_estimated,
             error=error,
+            agent=endpoint == "/diagnose/agent",
+            agent_tool_calls=agent_tool_calls,
+            agent_rounds=agent_rounds,
+            agent_forced=agent_forced,
         )
     )
 
