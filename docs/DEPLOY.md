@@ -154,7 +154,7 @@ LogWise/
 │   ├── demo_disk_full.log       # 演示：磁盘写满
 │   ├── demo_pod_evicted.log     # 演示：Pod 被驱逐（用来看上下文聚合的效果）
 │   ├── eval_cases.json          # 诊断质量评测集（38 条人工标注用例，5 档难度）
-│   └── fault_cases.jsonl        # 故障案例知识库（53 条「日志 → 诊断」，供检索使用）
+│   └── fault_cases.jsonl        # 故障案例知识库（56 条「日志 → 诊断」，供检索使用）
 ├── docs/                # 本目录：接口、部署、实验数据、踩坑记录
 ├── static/index.html    # 演示页
 ├── tests/               # 单元测试（289 项）
