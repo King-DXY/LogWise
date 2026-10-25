@@ -3,919 +3,178 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>LogWise · LLM 日志诊断助手</title>
-<style>
-  :root {
-    --ink: #0f172a;          /* 深色主色（顶栏/标题） */
-    --blue: #2563eb;         /* 主点缀 */
-    --blue-soft: #eff6ff;
-    --red: #dc2626;
-    --red-soft: #fef2f2;
-    --green: #16a34a;
-    --amber: #d97706;
-    --bg: #f1f5f9;
-    --card: #ffffff;
-    --line: #e2e8f0;
-    --muted: #64748b;
-    --faint: #94a3b8;
-    --mono: Consolas, "Courier New", monospace;
-  }
-  * { box-sizing: border-box; }
-  body { font-family: "Microsoft YaHei", system-ui, sans-serif; margin: 0; background: var(--bg); color: var(--ink); }
-
-  /* ---- 顶栏 ---- */
-  .topbar { background: var(--ink); color: #fff; padding: 14px 0; }
-  .topbar-inner { max-width: 960px; margin: 0 auto; padding: 0 24px; display: flex; align-items: center; gap: 14px; }
-  .logo { width: 30px; height: 30px; background: var(--blue); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 17px; }
-  .topbar h1 { font-size: 18px; margin: 0; font-weight: 700; }
-  .topbar .sub { font-size: 12.5px; color: #94a3b8; margin-top: 2px; }
-  .topbar .spacer { flex: 1; }
-  .chip { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: rgba(255,255,255,.12); color: #cbd5e1; font-family: var(--mono); }
-
-  .wrap { max-width: 960px; margin: 24px auto; padding: 0 24px; }
-
-  /* ---- 输入区 ---- */
-  .input-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
-  textarea { width: 100%; height: 170px; font-family: var(--mono); font-size: 13px; border: 1px solid #cbd5e1; border-radius: 8px; padding: 12px; resize: vertical; }
-  textarea:focus { outline: 2px solid var(--blue-soft); border-color: var(--blue); }
-  .btn-row { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
-  button { padding: 10px 26px; font-size: 15px; background: var(--blue); color: #fff; border: none; border-radius: 8px; cursor: pointer; font-weight: 600; }
-  button:hover { background: #1d4ed8; }
-  button:disabled { background: #94a3b8; cursor: not-allowed; }
-  button.ghost { background: #fff; color: var(--muted); border: 1px solid #cbd5e1; font-weight: 400; }
-  button.ghost:hover { background: #f8fafc; }
-  select.ghost { background: #fff; color: var(--muted); border: 1px solid #cbd5e1; border-radius: 8px; padding: 9px 10px; font-size: 13.5px; cursor: pointer; }
-  button.mini { padding: 4px 12px; font-size: 12.5px; font-weight: 400; }
-  .agent-toggle { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--ink); cursor: pointer; user-select: none; padding: 6px 12px; border: 1px dashed #cbd5e1; border-radius: 8px; }
-  .agent-toggle input { accent-color: var(--blue); width: 15px; height: 15px; }
-  #tip { font-size: 13px; color: var(--faint); }
-  .kbd-hint { font-size: 12px; color: var(--faint); margin-left: auto; }
-
-  /* ---- 版本过旧提示条 ---- */
-  .banner { display: none; background: #fef3c7; border: 1px solid #fcd34d; color: #92400e; border-radius: 10px; padding: 12px 14px; margin-top: 16px; font-size: 14px; line-height: 1.75; }
-  .banner code { background: #fff7ed; padding: 1px 6px; border-radius: 4px; font-family: var(--mono); }
-
-  /* ---- 通用卡片 ---- */
-  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px 20px; margin-top: 18px; display: none; }
-  .card > h3 { margin: 0 0 14px; font-size: 13px; color: var(--muted); font-weight: 600; letter-spacing: .4px; }
-  pre { white-space: pre-wrap; word-break: break-word; font-size: 13px; color: #334155; margin: 0; font-family: var(--mono); }
-
-  /* ---- Agent 决策时间线 ---- */
-  .tl { position: relative; padding-left: 26px; }
-  .tl::before { content: ""; position: absolute; left: 8px; top: 8px; bottom: 8px; width: 2px; background: var(--line); }
-  .tl-item { position: relative; padding: 6px 0 14px; }
-  .tl-item:last-child { padding-bottom: 2px; }
-  .tl-dot { position: absolute; left: -26px; top: 8px; width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; background: #fff; border: 2px solid var(--blue); color: var(--blue); z-index: 1; }
-  .tl-item.done .tl-dot { border-color: var(--green); color: var(--green); }
-  .tl-item.forced .tl-dot { border-color: var(--amber); color: var(--amber); }
-  .tl-title { font-size: 14px; font-weight: 600; }
-  .tl-body { font-size: 13px; color: var(--muted); margin-top: 4px; line-height: 1.7; }
-  .tl-tool { display: inline-block; background: var(--blue-soft); color: #1d4ed8; border-radius: 6px; padding: 2px 8px; font-family: var(--mono); font-size: 12px; margin-right: 6px; }
-  .tl-result { background: #f8fafc; border: 1px solid var(--line); border-radius: 6px; padding: 6px 10px; margin-top: 6px; font-family: var(--mono); font-size: 12px; color: var(--faint); word-break: break-all; }
-  .tl-stats { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--line); font-size: 12.5px; color: var(--faint); }
-
-  /* ---- 诊断结果卡片 ---- */
-  .diag-head { display: flex; align-items: flex-start; gap: 12px; }
-  .diag-type { flex: 1; font-size: 17px; font-weight: 700; line-height: 1.4; }
-  .err-tag { display: inline-block; background: var(--red-soft); color: var(--red); font-size: 11.5px; font-weight: 600; padding: 2px 9px; border-radius: 999px; vertical-align: middle; margin-bottom: 6px; }
-  .conf { text-align: right; min-width: 150px; }
-  .conf-num { font-size: 20px; font-weight: 800; }
-  .conf-bar { height: 7px; border-radius: 99px; background: var(--line); margin-top: 5px; overflow: hidden; }
-  .conf-fill { height: 100%; border-radius: 99px; }
-  .conf-label { font-size: 11.5px; color: var(--faint); margin-top: 3px; }
-  .diag-section { margin-top: 14px; font-size: 14px; line-height: 1.8; }
-  .diag-label { font-weight: 700; color: var(--muted); font-size: 12.5px; margin-bottom: 4px; }
-  .diag-steps { margin: 4px 0 0; padding-left: 22px; }
-  .diag-steps li { margin: 3px 0; }
-  details.evidence { margin-top: 4px; }
-  details.evidence summary { cursor: pointer; color: var(--blue); font-size: 13px; user-select: none; }
-  .evi-list { background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin-top: 6px; }
-  .evi-list div { font-family: var(--mono); font-size: 12px; color: var(--muted); padding: 2px 0; word-break: break-all; }
-  .cost-chip { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); font-size: 12.5px; color: var(--faint); font-family: var(--mono); }
-
-  /* ---- 上下文聚合（弱化展示） ---- */
-  .ctx-summary { font-size: 13.5px; color: #334155; margin: 0 0 4px; line-height: 1.7; }
-  .ctx-summary b { color: var(--blue); }
-  .ctx-hint { font-size: 12.5px; color: var(--faint); margin: 0 0 10px; }
-  .logrow { display: flex; gap: 8px; align-items: baseline; padding: 4px 8px; border-radius: 6px; border-left: 3px solid transparent; font-family: var(--mono); font-size: 12px; line-height: 1.55; }
-  .logrow.sel { background: #f8fafc; border-left-color: var(--blue); }
-  .logrow.sel.anchor { background: var(--blue-soft); border-left-color: var(--red); }
-  .logrow.skip { opacity: .38; }
-  .logrow .idx { flex: 0 0 26px; color: var(--faint); text-align: right; }
-  .logrow .lv { flex: 0 0 52px; font-weight: 700; }
-  .lv-INFO { color: var(--muted); }
-  .lv-WARN { color: #b45309; }
-  .lv-ERROR, .lv-CRITICAL, .lv-FATAL { color: var(--red); }
-  .logrow .msg { flex: 1; word-break: break-word; color: #334155; }
-  .logrow .tag { flex: 0 0 auto; font-size: 11px; padding: 1px 7px; border-radius: 4px; white-space: nowrap; }
-  .gaprow { text-align: center; color: var(--faint); font-size: 12px; padding: 3px 0; font-family: var(--mono); }
-  .tag.anchor { background: var(--red-soft); color: #b91c1c; }
-  .tag.sel { background: var(--blue-soft); color: #1d4ed8; }
-  .tag.skip { background: #e2e8f0; color: var(--muted); }
-  .legend { font-size: 12px; color: var(--faint); margin-top: 10px; }
-
-  /* ---- 解析结果（可折叠） ---- */
-  details.parse { margin-top: 18px; display: none; background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
-  details.parse[open] { padding-bottom: 14px; }
-  details.parse summary { cursor: pointer; padding: 14px 20px; font-size: 14px; color: var(--muted); font-weight: 600; user-select: none; list-style: none; }
-  details.parse summary::before { content: "▸ "; color: var(--faint); }
-  details.parse[open] summary::before { content: "▾ "; }
-  details.parse pre { padding: 0 20px; max-height: 300px; overflow: auto; }
-
-  /* ---- 友好错误提示框 ---- */
-  .errbox { border: 1px solid #fecaca; background: var(--red-soft); border-radius: 10px; padding: 14px 16px; }
-  .errbox-title { font-size: 14.5px; font-weight: 700; color: var(--red); display: flex; align-items: center; gap: 7px; }
-  .errbox-steps { margin: 8px 0 0; padding-left: 20px; font-size: 13.5px; color: #7f1d1d; line-height: 1.9; }
-  .errbox-steps code { background: #fff; border: 1px solid #fecaca; padding: 1px 6px; border-radius: 4px; font-family: var(--mono); font-size: 12.5px; }
-  .errbox-raw { margin-top: 8px; font-family: var(--mono); font-size: 11.5px; color: var(--faint); word-break: break-all; }
-
-  /* ---- 追问聊天气泡 ---- */
-  .chat-q { background: var(--blue-soft); border-radius: 8px; padding: 8px 12px; margin: 8px 0 4px; font-size: 14px; }
-  .chat-a { background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 4px 0 10px; font-size: 14px; line-height: 1.8; white-space: pre-wrap; word-break: break-word; }
-  .chat-cost { font-size: 11.5px; color: var(--faint); font-family: var(--mono); margin-top: 4px; }
-
-  /* ---- 页脚 ---- */
-  .footer { max-width: 960px; margin: 26px auto 40px; padding: 14px 24px 0; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--faint); display: flex; gap: 16px; flex-wrap: wrap; }
-  .footer a { color: var(--muted); text-decoration: none; }
-  .footer a:hover { color: var(--blue); }
-</style>
+<meta name="color-scheme" content="dark">
+<title>LogWise · 日志诊断工作台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%230b0f16'/%3E%3Cpath d='M4 12h3l2.5-6L13 19l3-9 1.5 2H20' fill='none' stroke='%2322d3ee' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/ui.css">
+<link rel="stylesheet" href="/assets/workbench.css">
 </head>
 <body>
 
-<div class="topbar">
-  <div class="topbar-inner">
-    <div class="logo">▣</div>
-    <div>
-      <h1>LogWise · LLM 日志诊断助手</h1>
-      <div class="sub">粘贴日志 → 大模型返回结构化诊断（错误类型 / 根因 / 影响 / 排查步骤）</div>
-    </div>
-    <div class="spacer"></div>
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
+        <path d="M3 12h3l2.5-6 3.5 13 3-9 2 2h4"/>
+      </svg>
+    </span>
+    <b>LogWise</b><span class="ver" id="verChip">v0.4 · api —</span>
+  </div>
+  <nav class="tabs">
+    <a class="active" href="/">工作台</a>
+    <a href="/dashboard.html">观测台</a>
+  </nav>
+  <div class="top-right">
+    <span class="chip" id="demoChip" hidden>演示数据</span>
+    <span class="chip" id="statusChip"><span class="dot"></span><span id="statusText">连接中</span></span>
     <span class="chip" id="modelChip">model: …</span>
-    <span class="chip" id="promptChip">prompt: …</span>
+    <button class="icon-btn" id="btnTheme" title="切换主题（暂只做深色）">☾</button>
   </div>
-</div>
+</header>
 
-<div class="wrap">
-
-  <div class="input-card">
-    <textarea id="logInput" placeholder="粘贴日志，例如：
-2025-09-14 10:23:46,789 ERROR [main] app.db - 连接数据库超时
-ConnectionError: connect timeout"></textarea>
-    <div class="btn-row">
-      <button id="btn" onclick="onDiagnoseClick()">开始诊断</button>
-      <select id="sampleSelect" class="ghost" title="一键填充演示日志">
-        <option value="">填充示例日志…</option>
-        <option value="demo_disk_full.log">磁盘写满（导出任务失败）</option>
-        <option value="demo_order_timeout.log">订单超时（多服务连锁报错）</option>
-        <option value="demo_pod_evicted.log">Pod 被驱逐（K8s 内存超限）</option>
-      </select>
-      <label class="agent-toggle">
-        <input type="checkbox" id="agentMode"> Agent 模式（模型自主决定是否查工具库）
-      </label>
-      <button id="clearBtn" class="ghost" onclick="clearAll()">一键清除</button>
-      <span id="tip"></span>
-      <span class="kbd-hint">Ctrl + Enter 快速诊断</span>
-    </div>
-  </div>
-
+<main class="page">
   <div class="banner" id="staleBanner">
-    ⚠️ <b>服务端是旧版本</b> —— 网页是新版，但后端进程还在跑改动之前的代码。<br>
-    解决办法：<b>关掉那个黑色命令行窗口</b>，再重新双击 <code>app\run.py</code>。
+    ⚠️ <b>服务端是旧版本</b> —— 网页是新版，但后端进程还在跑改动之前的代码。
+    关掉那个黑色命令行窗口，重新双击 <code>app\run.py</code> 即可。
   </div>
 
-  <!-- Agent 决策过程：核心卖点，置顶 -->
-  <div class="card" id="traceCard">
-    <h3>Agent 决策过程</h3>
-    <div class="tl" id="traceList"></div>
-  </div>
-
-  <!-- 诊断结果 -->
-  <div class="card" id="diagCard">
-    <h3><span id="diagTitle">诊断结果</span><button id="copyBtn" class="ghost mini" style="display:none; margin-left:8px;" onclick="copyDiagnosis()">复制结果</button></h3>
-    <div id="diagResult"></div>
-  </div>
-
-  <!-- 多轮追问 -->
-  <div class="card" id="followupCard">
-    <h3>追问（基于刚才的日志与诊断，30 分钟内有效）</h3>
-    <div id="chatList"></div>
-    <div style="display:flex; gap:8px; margin-top:10px;">
-      <input id="followupInput" type="text" placeholder="例如：第三步具体怎么操作？" style="flex:1; padding:9px 12px; border:1px solid #cbd5e1; border-radius:8px; font-size:14px;">
-      <button id="followupBtn" onclick="askFollowup()">发送</button>
+  <!-- ============================ 空态 / 输入态 ============================ -->
+  <section id="composer">
+    <div class="hero">
+      <h1>粘贴一段日志，拿到根因</h1>
+      <p>每条结论都能回溯到原文，Agent 的每一步都留痕</p>
     </div>
-  </div>
 
-  <!-- 上下文聚合：辅助信息 -->
-  <div class="card" id="ctxCard">
-    <h3>上下文聚合 —— 实际送给模型的日志</h3>
-    <p class="ctx-summary" id="ctxSummary"></p>
-    <p class="ctx-hint" id="ctxHint"></p>
-    <div id="ctxList"></div>
-    <div class="legend">
-      <span class="tag anchor">★ 锚点</span> 诊断的起点 ·
-      <span class="tag sel">已送模型</span> ·
-      <span class="tag skip">已丢弃</span>
+    <!-- 有历史结果时才出现：结果页能回到输入页，输入页也要能回到结果页 -->
+    <div class="resume" id="resumeBar" hidden>
+      <button class="btn" id="btnBack" title="回到上一次的诊断结果（不会重新调用模型）">
+        ↩ 返回上次诊断<span class="mono" id="resumeAt"></span>
+      </button>
+      <span class="hint" id="resumeHint"></span>
     </div>
-  </div>
 
-  <!-- 解析结果：折叠收纳 -->
-  <details class="parse" id="parseCard">
-    <summary>解析结果（结构化字段，点击展开）</summary>
-    <pre id="parseResult"></pre>
-  </details>
+    <div class="card input-card">
+      <textarea class="editor" id="logInput" spellcheck="false"
+        placeholder="把报错日志贴在这里，例如：
 
-</div>
-
-<div class="footer">
-  <span>FastAPI + DeepSeek · 本地运行</span>
-  <a href="/stats">成本 / token / 缓存命中率统计 →</a>
-  <span>API v5</span>
-</div>
-
-<script>
-function esc(s) {
-  return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-}
-
-async function readErrorDetail(resp) {
-  const raw = await resp.text();
-  try {
-    const body = JSON.parse(raw);
-    return String(body.detail || body.error || raw);
-  } catch (e) {
-    return raw || ("HTTP " + resp.status);
-  }
-}
-
-function isAbortError(e) {
-  return e && e.name === "AbortError";
-}
-
-// ---- 服务端版本检测 ----
-// Python 代码在启动时载入内存，改了代码不重启就不生效；而网页文件是每次现读磁盘的。
-// 于是会出现「页面是新版、接口是旧版」这种很迷惑的状态 —— 这里主动把它识别出来讲清楚。
-const EXPECTED_API = "5";
-const STALE_MSG = "服务端是旧版本，缺少这个接口。请关掉那个命令行窗口，重新双击 app\\run.py 后再试。";
-
-function isStale(status) { return status === 404 || status === 405; }
-function showStale() { document.getElementById("staleBanner").style.display = "block"; }
-
-async function checkServerVersion() {
-  try {
-    const r = await fetch("/health");
-    if (!r.ok) return;
-    const j = await r.json();
-    if (j.api !== EXPECTED_API) showStale();
-  } catch (e) { /* 服务没起来时不在这里报错 */ }
-}
-
-// ---- 顶栏元信息（/stats 对回环地址免鉴权）----
-async function loadMeta() {
-  try {
-    const r = await fetch("/stats");
-    if (!r.ok) return;
-    const j = await r.json();
-    document.getElementById("modelChip").textContent = "model: " + j.model;
-    document.getElementById("promptChip").textContent = "prompt: " + j.prompt_version;
-  } catch (e) { /* 保持占位 */ }
-}
-
-// 同一时间只允许一个诊断；请求 id 用来阻止旧响应覆盖新界面。
-let activeDiagnosis = null;
-
-function isActiveRun(run) {
-  return activeDiagnosis === run;
-}
-
-function assertActiveRun(run) {
-  if (!isActiveRun(run)) {
-    const e = new Error("诊断已取消");
-    e.name = "AbortError";
-    throw e;
-  }
-}
-
-function resetDiagnoseButton() {
-  const btn = document.getElementById("btn");
-  btn.disabled = false;
-  btn.textContent = "开始诊断";
-}
-
-function cancelDiagnosis(showFeedback = true) {
-  const run = activeDiagnosis;
-  if (run) {
-    activeDiagnosis = null;
-    run.controller.abort();
-    setSession(null);
-  }
-  resetDiagnoseButton();
-  if (run && showFeedback) {
-    document.getElementById("copyBtn").style.display = "none";
-    document.getElementById("diagResult").innerHTML = "<pre>已取消诊断。</pre>";
-  }
-}
-
-function onDiagnoseClick() {
-  if (activeDiagnosis) cancelDiagnosis();
-  else diagnose();
-}
-
-function clearAll() {
-  cancelDiagnosis(false);
-  document.getElementById("logInput").value = "";
-  ["ctxCard", "diagCard", "traceCard", "parseCard"].forEach(id => {
-    document.getElementById(id).style.display = "none";
-  });
-  document.getElementById("parseCard").open = false;
-  document.getElementById("copyBtn").style.display = "none";
-  setSession(null);
-  document.getElementById("ctxList").innerHTML = "";
-  document.getElementById("ctxSummary").textContent = "";
-  document.getElementById("ctxHint").textContent = "";
-  document.getElementById("parseResult").textContent = "";
-  document.getElementById("diagResult").innerHTML = "";
-  document.getElementById("traceList").innerHTML = "";
-  const tip = document.getElementById("tip");
-  tip.textContent = "已清除";
-  setTimeout(() => { tip.textContent = ""; }, 1500);
-  document.getElementById("logInput").focus();
-}
-
-// ---------------- 上下文聚合 ----------------
-function renderContext(cj) {
-  const card = document.getElementById("ctxCard");
-  card.style.display = "block";
-  const sum = document.getElementById("ctxSummary");
-  const hint = document.getElementById("ctxHint");
-
-  if (cj.error) {
-    sum.textContent = cj.error;
-    hint.textContent = "";
-    document.getElementById("ctxList").innerHTML = "";
-    return;
-  }
-  if (!Array.isArray(cj.logs)) {
-    // 防御：接口返回了预期之外的结构（通常是服务端版本对不上）
-    sum.textContent = STALE_MSG;
-    hint.textContent = "";
-    document.getElementById("ctxList").innerHTML = "";
-    showStale();
-    return;
-  }
-
-  if (!cj.enabled) {
-    sum.innerHTML = `上下文聚合已<b>关闭</b>：解析出 ${cj.total_parsed} 条日志，只把<b>锚点 1 条</b>送给模型（旧行为）。`;
-  } else if (cj.selected >= cj.total_parsed) {
-    sum.innerHTML = `解析出 <b>${cj.total_parsed}</b> 条日志，<b>全部 ${cj.selected} 条</b>都送给了模型。`;
-  } else {
-    sum.innerHTML = `解析出 <b>${cj.total_parsed}</b> 条日志，筛出 <b>${cj.selected}</b> 条送给模型`
-                  + `（窗口 ±${cj.window}，上限 ${cj.max_logs}${cj.truncated ? "，已触发裁剪" : ""}）。`;
-  }
-
-  const hints = [];
-  if (cj.display_limited) {
-    hints.push(`日志较多，下方只展示锚点附近与被选中的 ${cj.displayed} 条（完整共 ${cj.total_parsed} 条）。`);
-  }
-  if (!cj.display_limited && cj.enabled && cj.selected >= cj.total_parsed) {
-    hints.push("日志较短时通常会全选。粘贴一段长日志才能看到筛选和裁剪的效果。");
-  }
-  if (cj.enabled && cj.selected < cj.total_parsed) {
-    hints.push("被丢弃的主要是离锚点较远、级别又不高的日志。");
-  }
-  hint.innerHTML = hints.join(" ");
-
-  let prev = -1;
-  const rows = cj.logs.map(l => {
-    let gap = "";
-    if (prev >= 0 && l.index > prev + 1) gap = `<div class="gaprow">⋯ 省略 ${l.index - prev - 1} 条 ⋯</div>`;
-    prev = l.index;
-    const cls = l.selected ? (l.is_anchor ? "sel anchor" : "sel") : "skip";
-    let tag = "";
-    if (l.is_anchor) tag = '<span class="tag anchor">★ 锚点</span>';
-    else if (l.selected) tag = '<span class="tag sel">已送模型</span>';
-    else tag = '<span class="tag skip">已丢弃</span>';
-    return gap + `<div class="logrow ${cls}">`
-         + `<span class="idx">${l.index}</span>`
-         + `<span class="lv lv-${esc(l.level)}">${esc(l.level)}</span>`
-         + `<span class="msg">${esc(l.message)}</span>`
-         + tag + `</div>`;
-  }).join("");
-  document.getElementById("ctxList").innerHTML = rows;
-}
-
-// ---------------- 友好错误提示 ----------------
-// 把后端的技术报错翻译成「点哪里、改什么」的指引。
-// 覆盖三类最常见的失败：API Key 未配置 / 网络或限流 / 其他模型侧错误。
-function friendlyError(status, body) {
-  const raw = String(body || "").trim();
-  let title = "诊断失败";
-  let steps = [];
-
-  if (raw.includes("DEEPSEEK_API_KEY")) {
-    title = "还没配置 API Key";
-    steps = [
-      "在项目文件夹里把 <code>.env.example</code> 复制一份，改名为 <code>.env</code>",
-      "打开 <code>.env</code>，把 <code>DEEPSEEK_API_KEY=</code> 后面换成你的 Key（在 platform.deepseek.com 申请）",
-      "关掉黑色命令行窗口，重新双击 <code>app\\run.py</code>",
-    ];
-  } else if (status === 429) {
-    title = "请求太频繁，被限流了";
-    steps = ["稍等约 1 分钟再试（默认 20 次/60 秒）", "连续调试时可用「一键清除」后再发，避免重复请求"];
-  } else if (raw.includes("timeout") || raw.includes("Connect")) {
-    title = "连不上大模型服务";
-    steps = ["检查网络连接（DeepSeek API 需要能访问外网）", "如果你在公司网络，可能需要配置代理"];
-  } else if (status === 502) {
-    title = "大模型这次没能给出诊断";
-    steps = ["再点一次「开始诊断」重试（偶发失败重试通常能成功）", "连续失败时打开 <a href='/stats' style='color:#2563eb'>/stats</a> 查看详细错误"];
-  }
-
-  if (!steps.length) {
-    return `<pre>诊断失败: HTTP ${status}\n${esc(raw)}</pre>`;
-  }
-  return `<div class="errbox">
-    <div class="errbox-title">⚠️ ${esc(title)}</div>
-    <ol class="errbox-steps">${steps.map(s => `<li>${s}</li>`).join("")}</ol>
-    <div class="errbox-raw">技术细节：HTTP ${status} · ${esc(raw.slice(0, 300))}</div>
-  </div>`;
-}
-
-// ---------------- Agent 决策时间线 ----------------
-function fmtArgs(raw) {
-  try {
-    const obj = JSON.parse(raw);
-    return Object.entries(obj).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join("，");
-  } catch (e) { return raw; }
-}
-
-function renderTrace(trace, usage) {
-  const card = document.getElementById("traceCard");
-  const list = document.getElementById("traceList");
-  if (!trace || !Array.isArray(trace.rounds) || !trace.rounds.length) {
-    card.style.display = "none";
-    return;
-  }
-  card.style.display = "block";
-
-  const items = trace.rounds.map(r => {
-    if (r.decision === "answer") {
-      return `<div class="tl-item done"><div class="tl-dot">✓</div>
-        <div class="tl-title">第 ${r.round} 轮 · 信息足够，直接给出诊断</div></div>`;
-    }
-    const calls = (r.tool_calls || []).map(c =>
-      `<div class="tl-body"><span class="tl-tool">🔧 ${esc(c.name)}</span><span>${esc(fmtArgs(c.arguments))}</span>
-       <div class="tl-result">返回：${esc(c.result_excerpt || "")}</div></div>`
-    ).join("");
-    return `<div class="tl-item"><div class="tl-dot">●</div>
-      <div class="tl-title">第 ${r.round} 轮 · 模型判断信息不足，调用工具</div>${calls}</div>`;
-  }).join("");
-
-  let stats = "";
-  if (trace.forced_answer) {
-    stats = `<div class="tl-stats">⚠️ 工具调用轮次达到上限，已强制模型收尾（防成本失控）。</div>`;
-  } else {
-    const n = trace.tool_calls_total;
-    stats = `<div class="tl-stats">${
-      n === 0
-        ? "模型判断这是常见故障，<b>0 次调用工具</b>——与基线成本一致。"
-        : `共调用工具 <b>${n}</b> 次。`
-    }${usage ? ` · 本次输入 ${usage.prompt_tokens} tok（缓存命中 ${usage.cached_tokens}）+ 输出 ${usage.completion_tokens} tok，约 <b>¥${usage.cost_yuan}</b>` : ""}</div>`;
-  }
-  list.innerHTML = items + stats;
-}
-
-// ---------------- 诊断结果卡片 ----------------
-function confColor(v) {
-  if (v >= 0.8) return "var(--green)";
-  if (v >= 0.5) return "var(--amber)";
-  return "var(--red)";
-}
-
-function renderDiagnosis(d, usage) {
-  if (!d || typeof d !== "object" || !d.error_type) return null;
-  const conf = typeof d.confidence === "number" ? d.confidence : null;
-  const pct = conf === null ? null : Math.round(conf * 100);
-  const color = conf === null ? "var(--faint)" : confColor(conf);
-
-  const evi = (Array.isArray(d.evidence) && d.evidence.length)
-    ? `<details class="evidence"><summary>证据（${d.evidence.length} 条日志原文，点击展开）</summary>
-       <div class="evi-list">${d.evidence.map(e => `<div>· ${esc(e)}</div>`).join("")}</div></details>`
-    : "";
-  const steps = (Array.isArray(d.solution_steps) ? d.solution_steps : [])
-    .map(s => `<li>${esc(s)}</li>`).join("");
-
-  const usageHtml = usage
-    ? `<div class="cost-chip">输入 ${usage.prompt_tokens} tok（缓存命中 ${usage.cached_tokens}）
-       ＋ 输出 ${usage.completion_tokens} tok ≈ <b>¥${usage.cost_yuan}</b></div>`
-    : "";
-
-  return `
-    <div class="diag-head">
-      <div class="diag-type">
-        <span class="err-tag">错误类型</span><br>${esc(d.error_type)}
+2026-09-17 22:48:15,231 ERROR [scheduler-1] com.example.report.ReportJob - 日报生成失败
+java.io.IOException: No space left on device
+	at com.example.report.CsvWriter.writeRow(CsvWriter.java:93)"></textarea>
+      <div class="toolbar">
+        <button class="btn primary" id="btnRun">开始诊断</button>
+        <label class="switch" title="Agent 模式：模型自己决定要不要查案例库">
+          <input type="checkbox" id="agentMode" checked><span>Agent 模式</span>
+        </label>
+        <button class="btn" id="btnClear">清空</button>
+        <span class="kbd">Ctrl + Enter</span>
       </div>
-      ${pct === null ? "" : `<div class="conf">
-        <div class="conf-num" style="color:${color}">${pct}%</div>
-        <div class="conf-bar"><div class="conf-fill" style="width:${pct}%;background:${color}"></div></div>
-        <div class="conf-label">置信度${pct < 50 ? " · 信息不足，结论仅供参考" : ""}</div>
-      </div>`}
     </div>
-    <div class="diag-section"><div class="diag-label">根因</div>${esc(d.root_cause || "")}</div>
-    <div class="diag-section"><div class="diag-label">证据</div>${evi || "（未提供）"}</div>
-    <div class="diag-section"><div class="diag-label">影响范围</div>${esc(d.impact || "")}</div>
-    <div class="diag-section"><div class="diag-label">排查步骤</div><ol class="diag-steps">${steps}</ol></div>
-    ${usageHtml}`;
-}
 
-// ---------------- 多轮追问 ----------------
-let sessionId = null;  // 当前诊断会话（诊断接口返回，换日志就作废）
-let followupRequest = null;
+    <div class="samples" id="samples">
+      <button class="sample" data-file="demo_disk_full.log">
+        <b>磁盘写满</b>
+        <span>日报导出失败，5 分钟后报表下载连带 500</span>
+        <span class="sen">多服务连锁报错 · 第一条 ERROR 不是根因</span>
+      </button>
+      <button class="sample" data-file="demo_order_timeout.log">
+        <b>订单超时</b>
+        <span>三个服务依次报错，需要按时间线分清因果</span>
+        <span class="sen">上下文聚合最能体现价值的场景</span>
+      </button>
+      <button class="sample" data-file="demo_pod_evicted.log">
+        <b>Pod 被驱逐</b>
+        <span>OOMKilled，内存上限与堆参数不匹配</span>
+        <span class="sen">配置类故障 · 模型通常直接回答</span>
+      </button>
+    </div>
 
-function setSession(id) {
-  if (followupRequest) {
-    followupRequest.controller.abort();
-    followupRequest = null;
-  }
-  sessionId = id || null;
-  const card = document.getElementById("followupCard");
-  const input = document.getElementById("followupInput");
-  const btn = document.getElementById("followupBtn");
-  card.style.display = sessionId ? "block" : "none";
-  input.disabled = !sessionId;
-  btn.disabled = !sessionId;
-  document.getElementById("chatList").innerHTML = "";
-}
+    <div class="how">
+      <span>上下文聚合 <b>只送相关的 20 条</b></span>
+      <span>单次成本 <b>约 ¥0.0013</b></span>
+      <span>结果缓存 <b>相同日志不重复计费</b></span>
+      <span>鉴权 / 限流 / 每日预算 <b>已在后端就绪</b></span>
+    </div>
+  </section>
 
-async function askFollowup() {
-  if (followupRequest) return;
-  const input = document.getElementById("followupInput");
-  const q = input.value.trim();
-  if (!q || !sessionId) return;
-  const btn = document.getElementById("followupBtn");
-  const list = document.getElementById("chatList");
-  const request = { controller: new AbortController(), sid: sessionId };
-  followupRequest = request;
-  btn.disabled = true;
-  list.insertAdjacentHTML("beforeend", `<div class="chat-q">🙋 ${esc(q)}</div>`);
-  const aId = "a" + Date.now();
-  list.insertAdjacentHTML("beforeend", `<div class="chat-a" id="${aId}">思考中…</div>`);
-  input.value = "";
-  const aEl = document.getElementById(aId);
-  try {
-    const r = await fetch("/diagnose/followup", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ session_id: request.sid, question: q }),
-      signal: request.controller.signal,
-    });
-    if (followupRequest !== request) return;
-    if (!r.ok) {
-      const detail = await readErrorDetail(r);
-      if (followupRequest !== request) return;
-      aEl.textContent = "追问失败：" + detail;
-      if (r.status === 404) {
-        sessionId = null;  // 保留错误信息，禁止继续追问，直到重新诊断。
-        input.disabled = true;
-        btn.disabled = true;
-      }
-      return;
-    }
-    const j = await r.json();
-    if (followupRequest !== request) return;
-    aEl.textContent = j.answer;
-    const u = j.usage;
-    aEl.insertAdjacentHTML("beforeend",
-      `<div class="chat-cost">输入 ${u.prompt_tokens} tok（缓存命中 ${u.cached_tokens}）＋ 输出 ${u.completion_tokens} tok</div>`);
-  } catch (e) {
-    if (followupRequest === request && !isAbortError(e)) {
-      aEl.textContent = "追问失败: " + e;
-    }
-  } finally {
-    if (followupRequest === request) {
-      followupRequest = null;
-      btn.disabled = !sessionId;
-      input.disabled = !sessionId;
-      if (sessionId) input.focus();
-    }
-  }
-}
-document.getElementById("followupInput").addEventListener("keydown", e => {
-  if (e.key === "Enter") askFollowup();
-});
+  <!-- ============================== 结果态 ============================== -->
+  <section id="result" hidden>
+    <div class="logbar" id="logbar" title="点这一行回到输入区，可以改日志后重新诊断">
+      <span class="ico">▤</span>
+      <div id="logSummary">正在解析…</div>
+      <div class="right">
+        <span class="tag-agent" id="agentTag">Agent 模式</span>
+        <button class="btn" id="btnCopy" hidden title="复制成 Markdown：错误类型 / 置信度 / 根因 / 排查步骤">复制诊断</button>
+        <button class="btn btn-cancel" id="btnCancel" hidden>取消</button>
+        <button class="btn" id="btnEdit" title="回到输入区，日志内容会保留">编辑日志</button>
+        <button class="btn" id="btnRetry" title="用同一段日志再跑一次（命中缓存则不花钱）">重新诊断</button>
+      </div>
+    </div>
 
-// ---------------- SSE 读取辅助 ----------------
-// 逐行读出 SSE 事件，回调拿到 JSON.parse 后的 data；[DONE] 时结束。
-async function readSSE(resp, onEvent) {
-  const reader = resp.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
-    const lines = buf.split("\n");
-    buf = lines.pop();
-    for (const line of lines) {
-      if (!line.startsWith("data: ")) continue;
-      const data = line.slice(6);
-      if (data === "[DONE]") return true;
-      let parsed;
-      try {
-        parsed = JSON.parse(data);
-      } catch (e) {
-        throw new Error("收到无法解析的服务器事件");
-      }
-      onEvent(parsed);
-    }
-  }
-  return false;  // 没收到 [DONE] 就 EOF，属于连接中断而不是成功。
-}
+    <article class="card diag">
+      <header class="diag-head">
+        <div class="type">
+          <span class="kicker" id="dKicker">● 诊断中</span>
+          <h1 id="dTitle">正在分析日志…</h1>
+          <div class="meta">
+            <span id="mElapsed">—</span><span class="sep">·</span>
+            <span id="mCost">—</span><span class="sep">·</span>
+            <span id="mTools">—</span><span class="sep">·</span>
+            <span id="mReqId" title="请求 ID，可在观测台定位这次调用">—</span>
+          </div>
+        </div>
+        <div class="ring">
+          <svg width="94" height="94" viewBox="0 0 94 94">
+            <defs>
+              <linearGradient id="ringGrad" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#34d399"/><stop offset="1" stop-color="#22d3ee"/>
+              </linearGradient>
+            </defs>
+            <circle class="bg" cx="47" cy="47" r="39" fill="none" stroke-width="7"/>
+            <circle class="fg" id="ringFg" cx="47" cy="47" r="39" fill="none" stroke-width="7"
+                    stroke-dasharray="245" stroke-dashoffset="245"/>
+          </svg>
+          <div class="num"><b id="ringNum">—</b><span>置信度</span></div>
+        </div>
+      </header>
 
-// ---------------- Agent 模式（SSE 流式，实时渲染决策过程） ----------------
-async function diagnoseAgent(text, run) {
-  const diagRes = document.getElementById("diagResult");
-  const traceCard = document.getElementById("traceCard");
-  const traceList = document.getElementById("traceList");
-  traceList.innerHTML = "";
-  let preEl = null;
+      <p class="root" id="dRoot"></p>
+      <div id="dError"></div>
 
-  function appendToolRound(round, calls) {
-    traceCard.style.display = "block";
-    const callsHtml = (calls || []).map(c =>
-      `<div class="tl-body"><span class="tl-tool">🔧 ${esc(c.name)}</span><span>${esc(fmtArgs(c.arguments))}</span>
-       <div class="tl-result">返回：${esc(c.result_excerpt || "")}</div></div>`
-    ).join("");
-    traceList.insertAdjacentHTML("beforeend",
-      `<div class="tl-item"><div class="tl-dot">●</div>
-       <div class="tl-title">第 ${round} 轮 · 模型判断信息不足，调用工具</div>${callsHtml}</div>`);
-  }
+      <div class="next" id="dNext" hidden>
+        <span class="next-tag">下一步</span>
+        <div class="next-text" id="dNextText"></div>
+      </div>
 
-  let firstEvent = false;
-  const t0 = Date.now();
-  const timer = setInterval(() => {
-    if (!firstEvent && isActiveRun(run)) {
-      diagRes.innerHTML = `<pre>Agent 思考中（可能正在调用工具）… 已等待 ${Math.round((Date.now() - t0) / 1000)} 秒</pre>`;
-    }
-  }, 500);
+      <ul class="after" id="dAfter"></ul>
 
-  try {
-    const resp = await fetch("/diagnose/agent/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-      signal: run.controller.signal,
-    });
-    assertActiveRun(run);
-    if (!resp.ok) {
-      const detail = await readErrorDetail(resp);
-      assertActiveRun(run);
-      if (isStale(resp.status)) { showStale(); diagRes.innerHTML = `<pre>${STALE_MSG}</pre>`; }
-      else diagRes.innerHTML = friendlyError(resp.status, detail);
-      return;
-    }
-    let donePayload = null;
-    let streamError = "";
-    const completed = await readSSE(resp, ev => {
-      if (!isActiveRun(run)) return;
-      firstEvent = true;
-      if (ev.type === "tool_call") {
-        appendToolRound(ev.round, ev.tool_calls);
-      } else if (ev.type === "delta") {
-        if (!preEl) { diagRes.innerHTML = "<pre></pre>"; preEl = diagRes.querySelector("pre"); }
-        preEl.textContent += ev.text;
-      } else if (ev.type === "retry") {
-        if (!preEl) { diagRes.innerHTML = "<pre></pre>"; preEl = diagRes.querySelector("pre"); }
-        preEl.textContent = "（输出格式不合格，已自动纠错重试）";
-      } else if (ev.type === "error") {
-        streamError = ev.message || "Agent 诊断失败";
-        diagRes.innerHTML = friendlyError(502, streamError);
-      } else if (ev.type === "done") {
-        donePayload = ev;
-      }
-    });
-    assertActiveRun(run);
-    if (!completed && !streamError) throw new Error("连接中断，未收到完整诊断结果");
-    if (streamError || !donePayload) return;
+      <div class="folds">
+        <details class="fold" id="foldEvidence">
+          <summary>证据原文<span class="n" id="eviCount">0 条 · 点击定位到日志</span></summary>
+          <div class="fold-body"><ul class="evidence" id="eviList"></ul></div>
+        </details>
+        <details class="fold" id="foldCtx">
+          <summary>上下文聚合<span class="n" id="ctxCount">—</span></summary>
+          <div class="fold-body"><ul class="logrows" id="ctxList"></ul></div>
+        </details>
+        <details class="fold" id="foldTrace">
+          <summary>Agent 决策过程<span class="n" id="traceCount">—</span></summary>
+          <div class="fold-body"><ul class="trace" id="traceList"></ul></div>
+        </details>
+      </div>
+    </article>
 
-    renderTrace(donePayload.trace, donePayload.usage);
-    const cardHtml = renderDiagnosis(donePayload.diagnosis, donePayload.usage);
-    diagRes.innerHTML = cardHtml
-      ? cardHtml + (donePayload.cached ? '<div class="cost-chip">（命中缓存，本次未消耗 token；用量为首次生成时的记录）</div>' : "")
-      : `<pre>${esc(JSON.stringify(donePayload.diagnosis, null, 2))}</pre>`;
-    document.getElementById("copyBtn").style.display = "inline-block";
-    if (donePayload.session_id) setSession(donePayload.session_id);
-  } catch (e) {
-    if (isActiveRun(run) && !isAbortError(e)) {
-      diagRes.innerHTML = `<pre>诊断失败: ${esc(String(e))}</pre>`;
-    }
-  } finally {
-    clearInterval(timer);
-  }
-}
+    <div class="ask">
+      <span class="ico">💬</span>
+      <input id="askInput" placeholder="就这次诊断追问，例如：第三步具体怎么操作？" disabled>
+      <span class="ttl">30 分钟内有效</span>
+      <button class="send" id="askSend" disabled>发送</button>
+    </div>
+    <div class="chat" id="chat"></div>
+  </section>
+</main>
 
-// ---------------- 示例日志一键填充 ----------------
-document.getElementById("sampleSelect").addEventListener("change", async e => {
-  const file = e.target.value;
-  e.target.value = "";  // 允许连续选同一个示例
-  if (!file) return;
-  cancelDiagnosis(false);
-  setSession(null);
-  try {
-    const r = await fetch("/samples/" + file);
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const text = await r.text();
-    document.getElementById("logInput").value = text;
-    parseLoadedFor = "";
-    document.getElementById("diagResult").innerHTML = "";
-    document.getElementById("traceList").innerHTML = "";
-    ["diagCard", "traceCard", "ctxCard", "parseCard"].forEach(id => {
-      document.getElementById(id).style.display = "none";
-    });
-    document.getElementById("copyBtn").style.display = "none";
-    document.getElementById("logInput").focus();
-  } catch (err) {
-    alert("示例加载失败: " + err);
-  }
-});
-
-// ---------------- 复制诊断结果 ----------------
-function copyDiagnosis() {
-  const text = document.getElementById("diagResult").innerText;
-  navigator.clipboard.writeText(text).then(() => {
-    const b = document.getElementById("copyBtn");
-    b.textContent = "已复制 ✓";
-    setTimeout(() => { b.textContent = "复制结果"; }, 1500);
-  });
-}
-
-// ---------------- 解析结果：展开时才请求（懒加载） ----------------
-// 之前每次诊断都打 /parse + /context + /diagnose 三个接口，同一段日志后端解析三遍，
-// 还吃三个限流令牌。解析结果多数人根本不展开看，所以改成展开时才加载。
-let parseLoadedFor = "";  // 已加载的日志文本（避免重复请求）
-async function loadParseResult() {
-  const text = document.getElementById("logInput").value.trim();
-  if (!text || text === parseLoadedFor) return;
-  const parseRes = document.getElementById("parseResult");
-  parseRes.textContent = "解析中...";
-  try {
-    const p = await fetch("/parse", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
-    if (!p.ok) throw new Error(await readErrorDetail(p));
-    const pj = await p.json();
-    // 请求期间日志可能已被替换，旧响应不能覆盖新输入对应的解析结果。
-    if (document.getElementById("logInput").value.trim() !== text) return;
-    if (!Array.isArray(pj.logs)) throw new Error("服务返回的解析结果格式不正确");
-    parseRes.textContent = JSON.stringify(pj.logs, null, 2);
-    parseLoadedFor = text;
-  } catch (e) {
-    if (document.getElementById("logInput").value.trim() === text) {
-      parseRes.textContent = "解析失败: " + e;
-    }
-  }
-}
-document.getElementById("parseCard").addEventListener("toggle", e => {
-  if (e.target.open) loadParseResult();
-});
-
-// ---------------- 主流程 ----------------
-async function diagnose() {
-  if (activeDiagnosis) return;  // Ctrl+Enter 也不能绕过防重入
-  const text = document.getElementById("logInput").value.trim();
-  if (!text) return alert("请先粘贴日志");
-  const run = { controller: new AbortController() };
-  activeDiagnosis = run;
-  const btn = document.getElementById("btn");
-  const parseRes = document.getElementById("parseResult");
-  const diagRes = document.getElementById("diagResult");
-  btn.textContent = "取消诊断";
-  document.getElementById("parseCard").style.display = "block";
-  document.getElementById("diagCard").style.display = "block";
-  document.getElementById("traceCard").style.display = "none";
-  document.getElementById("copyBtn").style.display = "none";
-  setSession(null);  // 新一次诊断，旧会话作废（新的 session_id 会随结果回来）
-  // 解析卡片重置为「未加载」：文本变了，之前加载的结果已过期
-  parseLoadedFor = "";
-  parseRes.textContent = "（点击展开后自动加载）";
-  diagRes.innerHTML = "";
-
-  try {
-    // 1) 上下文聚合预览（不调用模型，不花钱）。预览失败不阻断后续诊断。
-    try {
-      const c = await fetch("/context", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-        signal: run.controller.signal,
-      });
-      assertActiveRun(run);
-      if (!c.ok) throw new Error(await readErrorDetail(c));
-      assertActiveRun(run);
-      const contextPayload = await c.json();
-      assertActiveRun(run);
-      renderContext(contextPayload);
-    } catch (e) {
-      if (isAbortError(e)) throw e;
-      if (isActiveRun(run)) {
-        document.getElementById("ctxSummary").textContent = "上下文预览失败: " + e;
-        document.getElementById("ctxHint").textContent = "";
-        document.getElementById("ctxList").innerHTML = "";
-        document.getElementById("ctxCard").style.display = "block";
-      }
-    }
-    assertActiveRun(run);
-
-    // 2) Agent 模式展示决策时间线；普通模式走 SSE 流式。
-    if (document.getElementById("agentMode").checked) {
-      document.getElementById("diagTitle").textContent = "诊断结果（Agent 模式）";
-      diagRes.innerHTML = "<pre>Agent 思考中（可能正在调用工具）…</pre>";
-      await diagnoseAgent(text, run);
-      return;
-    }
-    document.getElementById("diagTitle").textContent = "诊断结果（流式）";
-
-    // 用 POST 而不是 GET：日志放 URL 有长度上限，长日志会被服务器拒绝。
-    const resp = await fetch("/diagnose/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-      signal: run.controller.signal,
-    });
-    assertActiveRun(run);
-    if (!resp.ok) {
-      if (isStale(resp.status)) {
-        showStale();
-        diagRes.innerHTML = `<pre>${STALE_MSG}</pre>`;
-      } else {
-        const detail = await readErrorDetail(resp);
-        assertActiveRun(run);
-        diagRes.innerHTML = friendlyError(resp.status, detail);
-      }
-      return;
-    }
-
-    diagRes.innerHTML = "<pre></pre>";
-    const preEl = diagRes.querySelector("pre");
-    let fullText = "";
-    let streamError = "";
-    const completed = await readSSE(resp, parsed => {
-      if (!isActiveRun(run)) return;
-      // delta 是 JSON 字符串；错误 / 会话事件是 JSON 对象。
-      if (typeof parsed === "string") {
-        fullText += parsed;
-        preEl.textContent = fullText;
-      } else if (parsed.session_id) {
-        setSession(parsed.session_id);
-      } else if (parsed.error) {
-        streamError = parsed.error;
-      }
-    });
-    assertActiveRun(run);
-    if (!completed && !streamError) throw new Error("连接中断，未收到完整诊断结果");
-    if (streamError) {
-      const legacy = fullText.match(/^\[诊断出错\] ([\s\S]*)$/);
-      diagRes.innerHTML = friendlyError(502, streamError || (legacy && legacy[1]));
-      return;
-    }
-
-    const legacyError = fullText.match(/^\[诊断出错\] ([\s\S]*)$/);
-    if (legacyError) {
-      diagRes.innerHTML = friendlyError(502, legacyError[1]);
-      return;
-    }
-
-    // 只有收到 [DONE] 且拿到完整合法 JSON 才展示成功卡片。
-    let diagnosis;
-    try {
-      diagnosis = JSON.parse(fullText);
-    } catch (e) {
-      throw new Error("模型输出不完整或不是合法 JSON，请重试");
-    }
-    const cardHtml = renderDiagnosis(diagnosis);
-    if (!cardHtml) throw new Error("模型输出缺少必要诊断字段，请重试");
-    diagRes.innerHTML = cardHtml;
-    document.getElementById("copyBtn").style.display = "inline-block";
-  } catch (e) {
-    if (isActiveRun(run) && !isAbortError(e)) {
-      document.getElementById("copyBtn").style.display = "none";
-      diagRes.innerHTML = `<pre>诊断失败: ${esc(String(e))}</pre>`;
-    }
-  } finally {
-    if (isActiveRun(run)) {
-      activeDiagnosis = null;
-      resetDiagnoseButton();
-    }
-  }
-}
-
-// Ctrl+Enter 快速诊断
-document.getElementById("logInput").addEventListener("keydown", e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") onDiagnoseClick();
-});
-
-checkServerVersion();
-loadMeta();
-</script>
+<div id="toast"></div>
+<script src="/assets/ui.js"></script>
+<script src="/assets/workbench.js"></script>
 </body>
 </html>

@@ -19,12 +19,13 @@
 from __future__ import annotations
 
 import hmac
-import os
 import threading
 import time
 from dataclasses import dataclass
 
 from fastapi import HTTPException, Request
+
+from app import config, metrics
 
 DEFAULT_RATE_LIMIT = 20      # 每个窗口允许的请求数
 DEFAULT_RATE_WINDOW = 60.0   # 窗口长度（秒）
@@ -35,39 +36,66 @@ LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 # 配置读取
 # --------------------------------------------------------------------------- #
 def _flag(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+    """布尔配置。解析规则统一在 ``app/config.py``，这里只做转发。"""
+    return config.env_flag(name, default)
 
 
 def configured_api_key() -> str:
-    return os.getenv("LOGWISE_API_KEY", "").strip()
+    return config.env_str("LOGWISE_API_KEY", "")
 
 
 def auth_enabled() -> bool:
     return bool(configured_api_key())
 
 
+def trust_localhost() -> bool:
+    return _flag("LOGWISE_TRUST_LOCALHOST", True)
+
+
 def rate_limit_enabled() -> bool:
-    try:
-        return int(os.getenv("LOGWISE_RATE_LIMIT", DEFAULT_RATE_LIMIT)) > 0
-    except ValueError:
-        return True
+    return config.env_int("LOGWISE_RATE_LIMIT", DEFAULT_RATE_LIMIT) > 0
 
 
 def rate_capacity() -> int:
-    try:
-        return max(1, int(os.getenv("LOGWISE_RATE_LIMIT", DEFAULT_RATE_LIMIT)))
-    except ValueError:
-        return DEFAULT_RATE_LIMIT
+    return config.env_int("LOGWISE_RATE_LIMIT", DEFAULT_RATE_LIMIT, minimum=1)
 
 
 def rate_window() -> float:
-    try:
-        return max(1.0, float(os.getenv("LOGWISE_RATE_WINDOW", DEFAULT_RATE_WINDOW)))
-    except ValueError:
-        return DEFAULT_RATE_WINDOW
+    return config.env_float("LOGWISE_RATE_WINDOW", DEFAULT_RATE_WINDOW, minimum=1.0)
+
+
+# --------------------------------------------------------------------------- #
+# 输入长度守卫
+# --------------------------------------------------------------------------- #
+def max_log_chars() -> int:
+    """单次请求允许的日志字符数上限（0 = 不限制）。"""
+    return config.max_log_chars()
+
+
+def ensure_log_size(text: str) -> str:
+    """日志长度守卫：超限直接 413。
+
+    为什么必须在接口层挡，而不是等模型报错：
+    - 解析器是纯 Python 正则，几十万行的文本会占住线程池好几秒；
+    - 真送进模型的话，一次请求就可能花掉几块钱（DeepSeek 按 token 计费）；
+    - 模型侧超长只会回一个语焉不详的 400，用户完全不知道是自己贴多了。
+
+    返回原文本，方便调用方写成 ``text = ensure_log_size(req.text)``。
+    """
+    limit = max_log_chars()
+    if limit <= 0:
+        return text
+    size = len(text)
+    if size <= limit:
+        return text
+    raise HTTPException(
+        status_code=413,
+        detail=(
+            f"日志太长：{size:,} 字符，单次上限 {limit:,} 字符。"
+            "请先截取故障时间段（建议只贴锚点前后几百行）；"
+            "确实需要放宽，可在 .env 里调整 LOGWISE_MAX_LOG_CHARS。"
+        ),
+    )
 
 
 def client_ip(request: Request) -> str:
@@ -94,7 +122,7 @@ async def require_api_key(request: Request) -> None:
     """FastAPI 依赖：校验 X-API-Key 请求头。"""
     if not auth_enabled():
         return
-    if _flag("LOGWISE_TRUST_LOCALHOST", True) and is_localhost(request):
+    if trust_localhost() and is_localhost(request):
         return
 
     provided = request.headers.get("x-api-key", "")
@@ -191,6 +219,31 @@ async def rate_limit(request: Request) -> None:
         )
 
 
+def ensure_budget() -> None:
+    """每日预算闸门：当日花费达到上限就拒绝调用模型。
+
+    为什么需要它：限流管「速率」，缓存管「重复」，都管不住「一天总共花了多少」。
+    默认 20 次/分钟最坏能跑两万多次/天 —— 而默认配置里鉴权是关的，
+    服务一旦被放到公网，别人的调用要你付钱。这道闸门是钱包的最后一道防线。
+
+    只挂在**调模型**的接口上：/context、/parse、/stats 这些不花钱的接口
+    永远放行，否则超额之后连"看看花了多少"都做不到。
+    """
+    snapshot = metrics.store.daily_snapshot()
+    if not snapshot["exceeded"]:
+        return
+    limit = snapshot["limit_yuan"]
+    used = snapshot["used_yuan"]
+    raise HTTPException(
+        status_code=429,
+        detail=(
+            f"今日模型预算已用完：已花 ¥{used:.4f}，上限 ¥{limit:g}。"
+            "明天自动恢复；也可在 .env 里调整 LOGWISE_DAILY_BUDGET_YUAN"
+            "（设为 0 表示不限制）。"
+        ),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 供启动时打印的安全状态摘要
 # --------------------------------------------------------------------------- #
@@ -200,8 +253,11 @@ def startup_notice() -> str:
             "[提示] 未配置 LOGWISE_API_KEY，接口鉴权已关闭（适合本机演示）。\n"
             "       若要部署到公网，请在 .env 里设置 LOGWISE_API_KEY。"
         )
-    trust = "开启（本机请求免 Key）" if _flag("LOGWISE_TRUST_LOCALHOST", True) else "关闭（所有请求都要 Key）"
+    trust = "开启（本机请求免 Key）" if trust_localhost() else "关闭（所有请求都要 Key）"
+    budget = config.daily_budget_yuan()
+    budget_text = f"每日预算：¥{budget:g}（超出后拒绝调用模型）" if budget > 0 else "每日预算：不限制"
     return (
         f"[安全] 接口鉴权已开启；本机豁免：{trust}\n"
-        f"       限流：每 {int(rate_window())} 秒最多 {rate_capacity()} 次 / 每 IP"
+        f"       限流：每 {int(rate_window())} 秒最多 {rate_capacity()} 次 / 每 IP\n"
+        f"       {budget_text}"
     )

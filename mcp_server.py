@@ -19,7 +19,7 @@ Agent 循环能用。MCP（Model Context Protocol）是工具暴露的**标准�
       "mcpServers": {
         "logwise-fault-cases": {
           "command": "python",
-          "args": ["D:/LogWise/mcp_server.py"]
+          "args": ["/path/to/LogWise/mcp_server.py"]
         }
       }
     }

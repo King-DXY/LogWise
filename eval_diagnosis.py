@@ -117,7 +117,10 @@ def build_messages(
     for example in examples:
         messages.append({"role": "user", "content": example["log"]})
         messages.append({"role": "assistant", "content": example["diagnosis"]})
-    messages.append({"role": "user", "content": log_text})
+    # ⚠️ 必须与 app/diagnose.build_messages 的包裹方式一致（<log> 标签）。
+    # 评测脚本为了支持 --from-git 历史 Prompt 自己拼消息，这里一旦漂移，
+    # 就会出现「评测的 Prompt 和线上跑的不是同一个」—— 那 A/B 数据就失效了。
+    messages.append({"role": "user", "content": f"<log>\n{log_text}\n</log>"})
     return messages, retrieved_ids
 
 

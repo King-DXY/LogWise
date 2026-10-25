@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -21,6 +20,7 @@ import httpx
 from dotenv import load_dotenv
 from openai import AsyncOpenAI, OpenAI
 
+from app import config
 from app.apikey import read_api_key
 from app.parser import ParsedLog
 # PROMPT_VERSION 在本模块内未直接使用，但 main / 评测脚本一直从这里取，
@@ -50,13 +50,16 @@ _client_lock = threading.Lock()
 DEFAULT_READ_TIMEOUT = 60.0
 DEFAULT_CONNECT_TIMEOUT = 5.0
 DEFAULT_MAX_RETRIES = 1
+DEFAULT_BASE_URL = "https://api.deepseek.com"
 
 
 def _float_env(name: str, default: float) -> float:
-    try:
-        value = float(os.getenv(name, ""))
-    except (TypeError, ValueError):
-        return default
+    """读正浮点配置：非法值或非正数都回落到默认值。
+
+    为什么非正数也算非法：超时填 0 或负数在 OpenAI SDK 里会导致
+    「请求永远不超时」这种更难排查的状态，不如直接当没填。
+    """
+    value = config.env_float(name, default)
     return value if value > 0 else default
 
 
@@ -74,11 +77,7 @@ def max_retries() -> int:
 
     注意这**不是**「输出格式重试」—— 那是本模块自己的逻辑（见 diagnose_multi_ex）。
     """
-    try:
-        value = int(os.getenv("LOGWISE_LLM_MAX_RETRIES", DEFAULT_MAX_RETRIES))
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_RETRIES
-    return max(0, min(5, value))
+    return config.env_int("LOGWISE_LLM_MAX_RETRIES", DEFAULT_MAX_RETRIES, minimum=0, maximum=5)
 
 
 def _client_timeout() -> httpx.Timeout:
@@ -142,7 +141,12 @@ def _extract_usage(raw) -> Usage:
 
 def current_model() -> str:
     """当前模型名。缓存键里会带上它，换模型后旧缓存自动失效。"""
-    return os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    return config.env_str("DEEPSEEK_MODEL", "deepseek-chat") or "deepseek-chat"
+
+
+def base_url() -> str:
+    """模型接口地址。留空时回落官方地址，避免 ``base_url=""`` 这种难查的错。"""
+    return config.env_str("DEEPSEEK_BASE_URL", DEFAULT_BASE_URL) or DEFAULT_BASE_URL
 
 
 def get_client() -> OpenAI:
@@ -158,7 +162,7 @@ def get_client() -> OpenAI:
                 api_key = _require_api_key()
                 _client = OpenAI(
                     api_key=api_key,
-                    base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                    base_url=base_url(),
                     **client_options(),
                 )
     return _client
@@ -173,7 +177,7 @@ def get_async_client() -> AsyncOpenAI:
                 api_key = _require_api_key()
                 _async_client = AsyncOpenAI(
                     api_key=api_key,
-                    base_url=os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
+                    base_url=base_url(),
                     **client_options(),
                 )
     return _async_client
@@ -254,7 +258,11 @@ def build_messages(
     for ex in examples:
         messages.append({"role": "user", "content": ex["log"]})
         messages.append({"role": "assistant", "content": ex["diagnosis"]})
-    messages.append({"role": "user", "content": text})
+    # 用 <log> 包住待分析内容：配合 System Prompt 里的「安全边界」那一段，
+    # 让模型能明确区分「数据」和「指令」。日志是外部输入，可能被注入指令。
+    # 注意只包在消息层，`format_logs()` 的输出保持不变 —— 它还被检索层当 query 用，
+    # 改它会影响 BM25 打分（docs/EXPERIMENTS 第 6 节的数据就不可比了）。
+    messages.append({"role": "user", "content": f"<log>\n{text}\n</log>"})
     return messages
 
 

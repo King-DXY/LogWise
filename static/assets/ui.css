@@ -1,0 +1,181 @@
+/* ==========================================================================
+   LogWise · 共用设计系统
+   --------------------------------------------------------------------------
+   只放两个页面都要用的东西：颜色变量、顶栏、按钮、卡片、折叠、基础排版。
+   颜色全部走 CSS 变量 —— 以后加浅色主题只需要在 :root 上换一组值，不用改任何组件。
+   ========================================================================== */
+
+:root{
+  /* 底色 */
+  --bg:#070a10;
+  --surface:#0e141d;
+  --surface2:#121a25;
+  --line:#1a2331;
+  --line2:#26344a;
+
+  /* 文字三档：主 / 正文 / 辅助 */
+  --text:#e8eef7;
+  --body:#cdd8e6;
+  --muted:#94a3b8;
+  --aux:#5b6b80;
+
+  /* 强调与状态 */
+  --accent:#22d3ee;
+  --accent-strong:#4dd7ec;
+  --violet:#a78bfa;
+  --ok:#34d399;
+  --warn:#fbbf24;
+  --err:#fb7185;
+
+  --mono:"Cascadia Mono",Consolas,"JetBrains Mono",ui-monospace,monospace;
+  --sans:-apple-system,"Segoe UI",system-ui,"Microsoft YaHei",sans-serif;
+  --r:16px;
+  --r-sm:10px;
+}
+
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:
+    radial-gradient(1000px 460px at 78% -10%, rgba(34,211,238,.09), transparent 62%),
+    radial-gradient(800px 420px at 8% -6%, rgba(167,139,250,.06), transparent 58%),
+    var(--bg);
+  color:var(--text);
+  font-family:var(--sans);
+  font-size:14.5px;
+  line-height:1.7;
+  -webkit-font-smoothing:antialiased;
+  min-height:100vh;
+}
+code,.mono{font-family:var(--mono); font-variant-numeric:tabular-nums}
+a{color:inherit; text-decoration:none}
+::selection{background:rgba(34,211,238,.25)}
+
+/* 滚动条：深色下默认那条太亮 */
+::-webkit-scrollbar{width:10px;height:10px}
+::-webkit-scrollbar-thumb{background:#1e2a3a; border-radius:6px; border:2px solid transparent; background-clip:content-box}
+::-webkit-scrollbar-thumb:hover{background:#2a3a4e; background-clip:content-box}
+::-webkit-scrollbar-track{background:transparent}
+
+:focus-visible{outline:2px solid rgba(34,211,238,.6); outline-offset:2px; border-radius:6px}
+
+/* ---------------------------------------------------------------- 顶栏 */
+.topbar{
+  position:sticky; top:0; z-index:20;
+  display:flex; align-items:center; gap:22px;
+  padding:12px 30px; border-bottom:1px solid var(--line);
+  background:rgba(7,10,16,.8); backdrop-filter:blur(14px);
+}
+.brand{display:flex; align-items:center; gap:10px}
+.logo{
+  width:30px; height:30px; border-radius:9px; display:grid; place-items:center;
+  background:linear-gradient(145deg, rgba(34,211,238,.22), rgba(56,189,248,.06));
+  border:1px solid rgba(34,211,238,.35); color:var(--accent);
+  box-shadow:0 0 18px -6px rgba(34,211,238,.7);
+}
+.brand b{font-size:15px}
+.brand .ver{font-size:11px; color:var(--aux); margin-left:7px; font-family:var(--mono)}
+
+.tabs{display:flex; gap:4px; margin-left:10px}
+.tabs a{padding:6px 13px; border-radius:8px; font-size:13.5px; color:var(--muted); border:1px solid transparent}
+.tabs a.active{color:var(--text); background:rgba(34,211,238,.09); border-color:rgba(34,211,238,.26)}
+.tabs a:hover{color:var(--text)}
+
+.top-right{margin-left:auto; display:flex; align-items:center; gap:10px}
+.chip{
+  display:inline-flex; align-items:center; gap:6px; padding:4px 10px; border-radius:999px;
+  font-size:11px; font-family:var(--mono); color:var(--muted);
+  background:var(--surface2); border:1px solid var(--line);
+}
+.chip.live{color:var(--ok); border-color:rgba(52,211,153,.28); background:rgba(52,211,153,.08)}
+.chip.offline{color:var(--err); border-color:rgba(251,113,133,.28); background:rgba(251,113,133,.08)}
+.dot{width:6px; height:6px; border-radius:50%; background:currentColor}
+.chip.live .dot{background:var(--ok); box-shadow:0 0 0 3px rgba(52,211,153,.15)}
+.chip.offline .dot{background:var(--err); box-shadow:0 0 0 3px rgba(251,113,133,.15)}
+.icon-btn{
+  width:30px; height:30px; border-radius:9px; display:grid; place-items:center;
+  background:var(--surface2); border:1px solid var(--line); color:var(--muted); cursor:pointer;
+  font-size:13px;
+}
+.icon-btn:hover{color:var(--text); border-color:var(--line2)}
+
+/* ---------------------------------------------------------------- 按钮 */
+.btn{
+  border:1px solid var(--line2); background:transparent; color:var(--muted);
+  padding:6px 12px; border-radius:8px; font-size:12px; cursor:pointer;
+  font-family:var(--sans); transition:.15s; white-space:nowrap;
+}
+.btn:hover{color:var(--text); border-color:#31435c; background:rgba(255,255,255,.02)}
+.btn:disabled{opacity:.45; cursor:not-allowed}
+.btn.primary{
+  background:linear-gradient(180deg,#4dd7ec,#22b8d8); color:#04222b; font-weight:700;
+  border:none; box-shadow:0 10px 24px -14px rgba(34,211,238,.9);
+}
+.btn.primary:hover{background:linear-gradient(180deg,#6ae0f2,#2cc3e2); color:#04222b}
+
+/* ---------------------------------------------------------------- 卡片 */
+.card{
+  background:linear-gradient(180deg, rgba(255,255,255,.028), transparent 180px), var(--surface);
+  border:1px solid var(--line);
+  border-radius:var(--r);
+  box-shadow:0 1px 0 rgba(255,255,255,.04) inset, 0 30px 60px -40px rgba(0,0,0,.95);
+}
+.card-head{display:flex; align-items:center; gap:10px; padding:15px 20px; border-bottom:1px solid var(--line)}
+.card-head h2{
+  margin:0; font-size:11px; font-weight:650; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--muted);
+}
+.card-head .right{margin-left:auto; display:flex; gap:8px; align-items:center}
+.badge{
+  font-size:10.5px; font-family:var(--mono); padding:2px 8px; border-radius:999px;
+  background:rgba(34,211,238,.1); color:#7dd3fc; border:1px solid rgba(34,211,238,.22);
+}
+.badge.ok{background:rgba(52,211,153,.1); color:#6ee7b7; border-color:rgba(52,211,153,.24)}
+.badge.warn{background:rgba(251,191,36,.1); color:#fcd34d; border-color:rgba(251,191,36,.24)}
+.hint{font-size:10.5px; color:var(--aux); font-family:var(--mono)}
+
+/* ---------------------------------------------------------------- 折叠 */
+details.fold{border-top:1px solid var(--line)}
+details.fold:last-child{border-bottom:none}
+details.fold summary{
+  display:flex; align-items:center; gap:10px; padding:14px 20px;
+  font-size:12.5px; color:var(--muted); cursor:pointer; list-style:none; user-select:none;
+}
+details.fold summary::-webkit-details-marker{display:none}
+details.fold summary::before{content:"▸"; color:var(--aux); font-size:11px}
+details.fold[open] summary::before{content:"▾"}
+details.fold summary .n{margin-left:auto; font-family:var(--mono); font-size:10.5px; color:var(--aux)}
+details.fold summary:hover{color:var(--text); background:rgba(255,255,255,.015)}
+.fold-body{padding:2px 20px 20px}
+
+/* ---------------------------------------------------------------- 杂项 */
+.kbd{font-size:10.5px; color:var(--aux); font-family:var(--mono)}
+.foot-note{padding:13px 20px 16px; font-size:10.5px; color:var(--aux); line-height:1.7;
+  border-top:1px dashed rgba(26,35,49,.9)}
+.foot-note code{background:#0a1119; border:1px solid var(--line); padding:1px 5px; border-radius:4px}
+[hidden]{display:none !important}
+
+/* 轻提示：取代 alert() */
+#toast{
+  position:fixed; left:50%; bottom:26px; transform:translate(-50%, 20px);
+  background:#141d29; border:1px solid var(--line2); color:var(--text);
+  padding:9px 16px; border-radius:10px; font-size:12.5px;
+  box-shadow:0 18px 40px -20px rgba(0,0,0,.9);
+  opacity:0; pointer-events:none; transition:.2s; z-index:60; max-width:80vw;
+}
+#toast.show{opacity:1; transform:translate(-50%, 0)}
+
+/* 服务端版本过旧 / 离线提示条 */
+.banner{
+  display:none; margin-bottom:16px; padding:11px 14px; border-radius:10px;
+  border:1px solid rgba(251,191,36,.35); background:rgba(251,191,36,.08);
+  color:#fcd34d; font-size:12.5px; line-height:1.75;
+}
+.banner.show{display:block}
+.banner code{background:rgba(0,0,0,.3); padding:1px 6px; border-radius:4px; font-family:var(--mono)}
+
+@media (max-width:760px){
+  .topbar{padding:10px 16px; gap:12px}
+  .brand .ver{display:none}
+  .top-right .chip:not(.live):not(.offline){display:none}
+}

@@ -23,8 +23,7 @@ System Prompt 里已经有一段约束，说对话历史中的示例**只是格�
 """
 from __future__ import annotations
 
-import os
-
+from app import config
 from app.prompts import FEW_SHOT_EXAMPLES
 from app.retriever import RetrievedCase, get_retriever
 
@@ -52,19 +51,16 @@ RAG_NOTICE = """【本次附带的参考资料】
 
 
 def rag_enabled() -> bool:
-    return os.getenv("LOGWISE_RAG_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    return config.env_flag("LOGWISE_RAG_ENABLED", True)
 
 
 def rag_mode() -> str:
-    mode = os.getenv("LOGWISE_RAG_MODE", DEFAULT_MODE).strip().lower()
+    mode = config.env_str("LOGWISE_RAG_MODE", DEFAULT_MODE).lower()
     return mode if mode in MODES else DEFAULT_MODE
 
 
 def rag_top_k() -> int:
-    try:
-        return max(1, min(10, int(os.getenv("LOGWISE_RAG_TOP_K", DEFAULT_TOP_K))))
-    except (TypeError, ValueError):
-        return DEFAULT_TOP_K
+    return config.env_int("LOGWISE_RAG_TOP_K", DEFAULT_TOP_K, minimum=1, maximum=10)
 
 
 def retrieve(query: str, k: int | None = None) -> list[RetrievedCase]:

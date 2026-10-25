@@ -1,0 +1,93 @@
+/* ==========================================================================
+   LogWise · 观测台
+   只有三块：4 个数字（健康吗）→ 一条曲线（什么时候出的问题）→ 一张表（哪一条）。
+   ========================================================================== */
+
+.page{max-width:1180px; margin:0 auto; padding:34px 30px 60px}
+
+.head{display:flex; align-items:flex-end; gap:24px; margin-bottom:24px}
+.head h1{
+  margin:0; font-size:24px; letter-spacing:-.3px; font-weight:650;
+  background:linear-gradient(92deg,#eaf3ff,#9fdbef 60%,#a78bfa);
+  -webkit-background-clip:text; background-clip:text; color:transparent;
+}
+.head p{margin:7px 0 0; color:var(--muted); font-size:13px}
+.head .tools{margin-left:auto; display:flex; align-items:center; gap:9px}
+/* 下拉框长得像按钮（原生 select 在深色下是白底，很突兀） */
+select.btn{appearance:none; -webkit-appearance:none; cursor:pointer; padding-right:24px;
+  color:var(--muted); background-color:transparent;
+  background-image:linear-gradient(45deg, transparent 50%, var(--aux) 50%),
+                   linear-gradient(135deg, var(--aux) 50%, transparent 50%);
+  background-position:calc(100% - 13px) 11px, calc(100% - 9px) 11px;
+  background-size:4px 4px, 4px 4px; background-repeat:no-repeat}
+select.btn option{background:#0e141d; color:var(--text)}
+.switch{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); cursor:pointer}
+.switch input{
+  appearance:none; width:28px; height:16px; border-radius:999px; background:#1e2a3a;
+  border:1px solid #2c3c50; position:relative; cursor:pointer; transition:.18s;
+}
+.switch input:checked{background:rgba(34,211,238,.32); border-color:rgba(34,211,238,.55)}
+.switch input::after{content:""; position:absolute; top:2px; left:2px; width:10px; height:10px;
+  border-radius:50%; background:#8aa0b8; transition:.18s}
+.switch input:checked::after{left:14px; background:#c9f7ff}
+
+/* ---------------------------------------------------------------- KPI */
+.kpis{display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin-bottom:18px}
+.kpi{padding:18px 18px 15px; position:relative; overflow:hidden}
+.kpi .label{font-size:11px; letter-spacing:.08em; color:var(--aux)}
+.kpi .value{font-size:30px; font-weight:700; letter-spacing:-1px; margin-top:5px; line-height:1.15;
+  font-variant-numeric:tabular-nums}
+.kpi .value small{font-size:13px; font-weight:500; color:var(--muted); margin-left:2px; letter-spacing:0}
+.kpi .foot{margin-top:9px; font-size:10.5px; color:var(--aux); min-height:16px}
+.kpi .foot b{color:var(--ok); font-weight:600}
+.kpi .foot b.warn{color:var(--warn)}
+.kpi .bar{height:3px; border-radius:99px; background:#16202c; margin-top:11px; overflow:hidden}
+.kpi .bar i{display:block; height:100%; border-radius:99px;
+  background:linear-gradient(90deg,#22d3ee,#34d399); transition:width .4s ease}
+
+/* ---------------------------------------------------------------- 曲线 */
+.chart-card{margin-bottom:18px}
+.chart-body{padding:18px 20px 4px}
+.chart-body svg{display:block; width:100%}
+.axis{display:flex; justify-content:space-between; padding:8px 20px 10px;
+  font-size:10.5px; color:var(--aux); font-family:var(--mono)}
+.legend-row{display:flex; gap:20px; padding:0 20px 18px; font-size:11.5px; color:var(--muted); flex-wrap:wrap}
+.legend-row i{display:inline-block; width:8px; height:8px; border-radius:2px; margin-right:6px}
+
+/* ---------------------------------------------------------------- 表格 */
+table{width:100%; border-collapse:collapse; font-size:13px}
+th{text-align:left; font-weight:600; font-size:10px; letter-spacing:.1em; text-transform:uppercase;
+  color:var(--aux); padding:10px 20px; border-bottom:1px solid var(--line); white-space:nowrap}
+td{padding:12px 20px; border-bottom:1px solid rgba(26,35,49,.7); color:var(--body); white-space:nowrap}
+tr:last-child td{border-bottom:none}
+tbody tr:hover{background:#111a25}
+td.mono,th.mono{font-family:var(--mono); font-variant-numeric:tabular-nums}
+.ep{color:#7dd3fc; font-family:var(--mono); font-size:12.5px}
+/* 窄屏下表格横向滚动，不挤压列 */
+.table-wrap{overflow-x:auto}
+
+.pill{font-size:10px; padding:1px 8px; border-radius:999px; font-family:var(--mono)}
+.pill.ok{background:rgba(52,211,153,.1); color:#6ee7b7; border:1px solid rgba(52,211,153,.22)}
+.pill.err{background:rgba(251,113,133,.1); color:#fda4af; border:1px solid rgba(251,113,133,.24)}
+.pill.cache{background:rgba(34,211,238,.1); color:#7dd3fc; border:1px solid rgba(34,211,238,.22)}
+
+/* ---------------------------------------------------------------- 空态 */
+.empty{
+  grid-column:1/-1; padding:52px 30px; text-align:center;
+  border:1px dashed var(--line2); border-radius:var(--r); background:rgba(14,20,29,.6);
+}
+.empty .big{font-size:26px; margin-bottom:10px; opacity:.5}
+.empty h3{margin:0 0 8px; font-size:15px; font-weight:600; color:var(--body)}
+.empty p{margin:0; font-size:12.5px; color:var(--aux); line-height:1.8}
+.empty a{color:var(--accent)}
+.empty .btn{margin-top:16px}
+
+/* 加载占位 */
+.loading{padding:40px; text-align:center; color:var(--aux); font-size:12.5px}
+
+@media (max-width:1000px){
+  .kpis{grid-template-columns:1fr 1fr}
+  .page{padding:24px 18px 50px}
+  .head{flex-wrap:wrap}
+  .head .tools{margin-left:0}
+}

@@ -12,17 +12,22 @@
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import logging
 import time
+import uuid
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app import cache as cache_mod
+from app import config
 from app import context as context_mod
 from app import guard, metrics, rag
 from app import session as session_mod
@@ -43,6 +48,9 @@ from app.parser import ParsedLog, parse_text
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# 结构化日志的统一 logger；handler 在 app/run.py 里配置（测试环境不配）
+log = logging.getLogger("logwise")
+
 app = FastAPI(
     title="LogWise",
     description="LLM 智能日志诊断助手",
@@ -53,14 +61,173 @@ app = FastAPI(
 # /health 故意不加：K8s 的 readiness/liveness 探针必须能无条件访问。
 PROTECTED = [Depends(guard.require_api_key), Depends(guard.rate_limit)]
 
+# 会调模型、会花钱的接口再加一道「每日预算」闸门。
+# /context、/parse、/stats 这些不花钱的接口不加 —— 预算用完之后，
+# 至少还要能看统计、能解析日志。
+BILLABLE = [*PROTECTED, Depends(guard.ensure_budget)]
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """给每个请求分配关联 ID，并回写到响应头。
+
+    有了它，页面上「这一次点击」才能和 ``/stats`` 里的那条记录对上号。
+    客户端可以自带 ``X-Request-ID``（网关串联用），没有就生成 12 位短 ID。
+
+    ⚠️ 这里设置 ContextVar 后**不重置**：SSE 的响应体是在中间件返回之后
+    才迭代的，提前重置会让流式路径里的度量记录拿不到 ID。
+    每个请求跑在各自的 task 上下文里，不会串到下一个请求。
+    """
+    rid = (request.headers.get(config.REQUEST_ID_HEADER) or "").strip()
+    rid = rid or uuid.uuid4().hex[:12]
+    request.state.request_id = rid
+    config.set_request_id(rid)
+    response = await call_next(request)
+    response.headers[config.REQUEST_ID_HEADER] = rid
+
+    # 静态资源要求浏览器每次回源校验，避免「改了前端但看到的还是旧页面」。
+    # StaticFiles 默认只给 ETag / Last-Modified，没有 Cache-Control ——
+    # 浏览器于是按启发式规则自己决定缓存多久，实测会出现「明明改了
+    # workbench.js，页面行为还是旧的」这种极难排查的现象。
+    # 这里显式加 no-cache：文件没变时走 304，几乎零成本；变了立刻拿到新版本。
+    path = request.url.path
+    if path.startswith("/assets/") or path.endswith((".html", ".css", ".js")):
+        response.headers["Cache-Control"] = "no-cache"
+
+    return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """兜底：任何没被捕获的异常都不该以 500 裸奔的形式甩给用户。
+
+    之前的行为：uvicorn 直接返回纯文本 500，前端拿到一坨堆栈，用户不知道
+    发生了什么，日志里也没有 request_id。现在返回一句人话 + 关联 ID，
+    并把结构化记录写进日志（含堆栈），排查时能一条命令定位。
+    """
+    request_id = getattr(request.state, "request_id", "")
+    log.error(
+        "unhandled_exception",
+        exc_info=exc,
+        extra={
+            "data": {
+                "request_id": request_id,
+                "method": request.method,
+                "path": request.url.path,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+        },
+    )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "服务内部错误，已记录日志（可用请求 ID 在 /stats 里定位）",
+            "request_id": request_id,
+        },
+    )
+
 SSE_DONE = "data: [DONE]\n\n"
 NO_LOG_MSG = "未解析到任何日志"
+
+# --------------------------------------------------------------------------- #
+# SSE 传输层：统一响应头 + 心跳
+# --------------------------------------------------------------------------- #
+# 三个响应头都有明确来由，别删：
+#   Cache-Control: no-cache, no-transform  中间层不得缓存或改写分块
+#   X-Accel-Buffering: no                  Nginx 默认会缓冲 text/event-stream，
+#                                          表现就是「攒到最后一次性输出」
+#                                          —— PITFALLS #1 在代理层换了个位置复现
+#   Connection: keep-alive                 明确告诉代理这是一条长连接
+SSE_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+# 心跳间隔（秒）。一次 Agent 诊断可能跑十几秒，中间一个字节都没有，
+# 部分网关会按空闲超时断开，前端只能看到「连接中断」。
+# 心跳是一行 SSE 注释（": ping"），浏览器自动忽略，但字节流不再空闲。
+DEFAULT_SSE_HEARTBEAT = 15.0
+
+
+def sse_heartbeat_seconds() -> float:
+    """心跳间隔；0 表示关闭（测试与本地调试用）。"""
+    return config.env_float("LOGWISE_SSE_HEARTBEAT", DEFAULT_SSE_HEARTBEAT, minimum=0.0)
+
+
+async def _aiter(body):
+    """把同步迭代器 / 异步迭代器统一成异步迭代器。"""
+    if hasattr(body, "__aiter__"):
+        async for item in body:
+            yield item
+    else:
+        for item in body:
+            yield item
+
+
+async def _with_heartbeat(body, interval: float | None = None):
+    """在没有产出的空档插入心跳事件。
+
+    实现要点：真正的迭代跑在独立 task 里，通过队列交给消费端。
+    **不能**对迭代本身用 ``asyncio.wait_for`` —— 超时会取消 ``__anext__``，
+    把底层生成器（以及它持有的模型流）直接弄死。
+    """
+    interval = sse_heartbeat_seconds() if interval is None else interval
+    agen = _aiter(body)
+    if interval <= 0:
+        async for chunk in agen:
+            yield chunk
+        return
+
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def pump() -> None:
+        try:
+            async for chunk in agen:
+                queue.put_nowait(("chunk", chunk))
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:  # noqa: BLE001 - 交给消费端原样重抛
+            queue.put_nowait(("error", exc))
+        finally:
+            with contextlib.suppress(Exception):
+                queue.put_nowait(("end", None))
+
+    task = asyncio.ensure_future(pump())
+    try:
+        while True:
+            try:
+                kind, payload = await asyncio.wait_for(queue.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                yield ": ping\n\n"
+                continue
+            if kind == "chunk":
+                yield payload
+            elif kind == "error":
+                raise payload
+            else:
+                return
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(BaseException):
+                await task
+
+
+def _sse_response(body) -> StreamingResponse:
+    """构造带防缓冲头与心跳的 SSE 响应。所有流式接口都必须走这里。"""
+    return StreamingResponse(
+        _with_heartbeat(body),
+        media_type="text/event-stream",
+        headers=SSE_HEADERS,
+    )
+
 
 # /context 接口最多展示多少条日志。
 # 只影响「前端展示」，不影响实际送给模型的日志（那由 app.context 决定）。
 # 实测 2 万条日志的响应体约 4MB、前端要渲染 2 万行 DOM，浏览器会卡；
 # 而 500 行既能覆盖绝大多数实际粘贴量，渲染也毫无压力。
-MAX_CONTEXT_DISPLAY = 500
+MAX_CONTEXT_DISPLAY = config.env_int("LOGWISE_MAX_CONTEXT_DISPLAY", 500, minimum=1)
 
 
 class ParseRequest(BaseModel):
@@ -92,10 +259,15 @@ class FollowUpRequest(BaseModel):
 # --------------------------------------------------------------------------- #
 # 基础接口
 # --------------------------------------------------------------------------- #
-# 接口契约版本。改了路由签名或响应结构就 +1 —— 前端拿它做「服务端是不是旧版」的握手。
+# 接口契约版本。改了路由签名或**破坏性**响应结构才 +1 —— 前端拿它做「服务端是不是旧版」的握手。
+# 注意：本次只做了**新增**（/config、/stats 扩展字段、X-Request-ID 响应头），
+# 属于向后兼容，所以保持 5。前端是严格相等比较，贸然 +1 会让现有页面误报「服务端是旧版」。
 # 用 /health 而不是某个业务接口来做这件事，是因为它不计度量、也不受限流，
 # 前端每次刷新页面探测一次不会污染 /stats 的请求数，也不会吃掉限流额度。
 API_REVISION = "5"
+
+# 观测台的时间范围 → 返回多少分钟的序列（内存里始终保留 24 小时）
+STATS_RANGES = {"1h": 60, "6h": 360, "24h": 1440}
 
 
 @app.get("/health")
@@ -105,11 +277,18 @@ def health():
 
 
 @app.get("/stats", dependencies=PROTECTED)
-def stats():
-    """运行时度量：请求量、耗时、token 用量、估算成本、缓存命中率。"""
+def stats(range: str = "1h"):
+    """运行时度量：请求量、耗时、token 用量、估算成本、缓存命中率。
+
+    ``range`` 只影响 ``metrics.timeseries`` 返回多少条（1h / 6h / 24h）——
+    内存里始终保留 24 小时，但默认只回 60 条，否则每 5 秒一次的轮询会
+    反复推 1440 行 JSON。其余聚合指标始终是「进程启动以来」的全量累计。
+    """
+    minutes = STATS_RANGES.get(range, STATS_RANGES["1h"])
     return {
         "model": current_model(),
         "prompt_version": PROMPT_VERSION,
+        "range": {"requested": range if range in STATS_RANGES else "1h", "minutes": minutes},
         "context": {
             "enabled": context_mod.context_enabled(),
             "window": context_mod.context_window(),
@@ -117,11 +296,23 @@ def stats():
             "note": "决定把哪些日志送给模型；参数已纳入缓存键",
         },
         "rag": rag.describe(),
-        "metrics": metrics.store.summary(),
+        "metrics": metrics.store.summary(timeseries_minutes=minutes),
         "cache": cache_mod.cache.snapshot(),
         "sessions": session_mod.store.snapshot(),
         "rate_limit": guard.limiter.snapshot(),
+        # 生效配置：观测台一个请求就能拿全，不用再翻 .env
+        "config": config.snapshot(),
     }
+
+
+@app.get("/config", dependencies=PROTECTED)
+def config_dump():
+    """当前生效的配置（已脱敏，不含任何 Key）。
+
+    存在的理由：配置散在 .env / 环境变量 / 代码默认值三处，
+    「我明明改了怎么没效果」是这类项目最常见的疑问 —— 这里直接回显最终值。
+    """
+    return {"api_revision": API_REVISION, **config.snapshot()}
 
 
 @app.get("/context", dependencies=PROTECTED)
@@ -150,7 +341,8 @@ def context_preview_post(req: TextRequest):
 
 
 def _context_payload(text: str) -> dict:
-    logs = parse_text(text)
+    # GET / POST 两个入口共用这里，所以长度守卫放在这一层
+    logs = parse_text(guard.ensure_log_size(text))
     if not logs:
         return {"error": NO_LOG_MSG}
 
@@ -216,7 +408,7 @@ def stats_reset():
 def parse(req: ParseRequest):
     """解析日志，返回结构化字段列表。"""
     started = time.perf_counter()
-    logs = parse_text(req.text)
+    logs = parse_text(guard.ensure_log_size(req.text))
     metrics.store.record(
         metrics.CallRecord(
             endpoint="/parse",
@@ -229,12 +421,12 @@ def parse(req: ParseRequest):
 # --------------------------------------------------------------------------- #
 # 诊断（一次性返回）
 # --------------------------------------------------------------------------- #
-@app.post("/diagnose", dependencies=PROTECTED)
+@app.post("/diagnose", dependencies=BILLABLE)
 def diagnose(req: DiagnoseRequest):
     """解析 + 诊断，一次性返回 JSON。命中缓存时不调用模型。"""
     started = time.perf_counter()
 
-    logs = parse_text(req.text)
+    logs = parse_text(guard.ensure_log_size(req.text))
     if not logs:
         _record("/diagnose", started, error=NO_LOG_MSG)
         return {"error": NO_LOG_MSG}
@@ -288,7 +480,7 @@ def diagnose(req: DiagnoseRequest):
 # --------------------------------------------------------------------------- #
 # 诊断（Agent 模式：模型自主决定是否调用工具）
 # --------------------------------------------------------------------------- #
-@app.post("/diagnose/agent", dependencies=PROTECTED)
+@app.post("/diagnose/agent", dependencies=BILLABLE)
 def diagnose_agent(req: DiagnoseRequest):
     """Agent 模式诊断：解析 + 聚合后，由模型自主决定查不查工具。
 
@@ -303,7 +495,7 @@ def diagnose_agent(req: DiagnoseRequest):
 
     started = time.perf_counter()
 
-    logs = parse_text(req.text)
+    logs = parse_text(guard.ensure_log_size(req.text))
     if not logs:
         _record("/diagnose/agent", started, error=NO_LOG_MSG)
         return {"error": NO_LOG_MSG}
@@ -374,7 +566,7 @@ def diagnose_agent(req: DiagnoseRequest):
 # --------------------------------------------------------------------------- #
 # 诊断（SSE 流式）
 # --------------------------------------------------------------------------- #
-@app.get("/diagnose/stream", dependencies=PROTECTED)
+@app.get("/diagnose/stream", dependencies=BILLABLE)
 async def diagnose_stream_get(text: str):
     """SSE 流式诊断（GET 版）。
 
@@ -384,7 +576,7 @@ async def diagnose_stream_get(text: str):
     return await run_in_threadpool(_stream_response, text)
 
 
-@app.post("/diagnose/stream", dependencies=PROTECTED)
+@app.post("/diagnose/stream", dependencies=BILLABLE)
 async def diagnose_stream_post(req: TextRequest):
     """SSE 流式诊断（POST 版）。日志放在 JSON body 里，没有长度限制。"""
     return await run_in_threadpool(_stream_response, req.text)
@@ -400,13 +592,11 @@ def _stream_response(text: str) -> StreamingResponse:
     """
     started = time.perf_counter()
 
+    text = guard.ensure_log_size(text)
     logs = parse_text(text)
     if not logs:
         _record("/diagnose/stream", started, error=NO_LOG_MSG)
-        return StreamingResponse(
-            iter([_sse_obj({"error": NO_LOG_MSG}), SSE_DONE]),
-            media_type="text/event-stream",
-        )
+        return _sse_response(iter([_sse_obj({"error": NO_LOG_MSG}), SSE_DONE]))
 
     target = _pick_target(logs)
     context = build_context(logs)
@@ -426,7 +616,7 @@ def _stream_response(text: str) -> StreamingResponse:
             yield _sse_obj({"session_id": sid})
             yield SSE_DONE
 
-        return StreamingResponse(replay(), media_type="text/event-stream")
+        return _sse_response(replay())
 
     # ---- 未命中：真正调用模型 ----
     usage = Usage()
@@ -475,13 +665,13 @@ def _stream_response(text: str) -> StreamingResponse:
             )
         yield SSE_DONE
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return _sse_response(gen())
 
 
 # --------------------------------------------------------------------------- #
 # 诊断（Agent 模式：SSE 流式，实时推送每轮工具调用）
 # --------------------------------------------------------------------------- #
-@app.post("/diagnose/agent/stream", dependencies=PROTECTED)
+@app.post("/diagnose/agent/stream", dependencies=BILLABLE)
 async def diagnose_agent_stream(req: TextRequest):
     """Agent 模式流式诊断：决策过程实时推送，而不是最后一次性返回。
 
@@ -493,12 +683,9 @@ async def diagnose_agent_stream(req: TextRequest):
     started = time.perf_counter()
 
     def _err_stream(msg: str) -> StreamingResponse:
-        return StreamingResponse(
-            iter([_sse_obj({"type": "error", "message": msg}), SSE_DONE]),
-            media_type="text/event-stream",
-        )
+        return _sse_response(iter([_sse_obj({"type": "error", "message": msg}), SSE_DONE]))
 
-    logs = parse_text(req.text)
+    logs = parse_text(guard.ensure_log_size(req.text))
     if not logs:
         _record("/diagnose/agent/stream", started, error=NO_LOG_MSG)
         return _err_stream(NO_LOG_MSG)
@@ -529,7 +716,7 @@ async def diagnose_agent_stream(req: TextRequest):
             yield _sse_obj({**payload, "type": "done", "cached": True, "session_id": session_id})
             yield SSE_DONE
 
-        return StreamingResponse(replay(), media_type="text/event-stream")
+        return _sse_response(replay())
 
     # ---- 未命中：桥接同步生成器为 SSE ----
     async def gen():
@@ -590,13 +777,13 @@ async def diagnose_agent_stream(req: TextRequest):
             )
         yield SSE_DONE
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    return _sse_response(gen())
 
 
 # --------------------------------------------------------------------------- #
 # 多轮追问
 # --------------------------------------------------------------------------- #
-@app.post("/diagnose/followup", dependencies=PROTECTED)
+@app.post("/diagnose/followup", dependencies=BILLABLE)
 def followup(req: FollowUpRequest):
     """在一次诊断的会话里追问。
 
@@ -759,10 +946,12 @@ def _record(
     是唯一例外，因为 agent 字段本来就是端点私有的。
     """
     usage = usage or Usage()
+    duration_ms = (time.perf_counter() - started) * 1000
+    request_id = config.current_request_id()
     metrics.store.record(
         metrics.CallRecord(
             endpoint=endpoint,
-            duration_ms=(time.perf_counter() - started) * 1000,
+            duration_ms=duration_ms,
             prompt_tokens=usage.prompt_tokens,
             cached_prompt_tokens=usage.cached_tokens,
             completion_tokens=usage.completion_tokens,
@@ -770,11 +959,33 @@ def _record(
             llm_call=llm_call,
             tokens_estimated=tokens_estimated,
             error=error,
+            request_id=request_id,
             agent=endpoint.startswith("/diagnose/agent"),
             agent_tool_calls=agent_tool_calls,
             agent_rounds=agent_rounds,
             agent_forced=agent_forced,
         )
+    )
+
+    # 结构化日志（一行一个 JSON）：日志里能直接查「哪次请求花了多少、有没有报错」。
+    # 只在 run.py 配置了 handler 时才会输出；测试环境不配置，避免刷屏。
+    log.info(
+        "request",
+        extra={
+            "data": {
+                "request_id": request_id,
+                "endpoint": endpoint,
+                "duration_ms": round(duration_ms, 1),
+                "llm_call": llm_call,
+                "cache_hit": cache_hit,
+                "prompt_tokens": usage.prompt_tokens,
+                "cached_prompt_tokens": usage.cached_tokens,
+                "completion_tokens": usage.completion_tokens,
+                "error": error or None,
+                "agent_tool_calls": agent_tool_calls or None,
+                "agent_rounds": agent_rounds or None,
+            }
+        },
     )
 
 

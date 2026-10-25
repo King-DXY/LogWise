@@ -11,12 +11,13 @@
 from __future__ import annotations
 
 import math
-import os
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from typing import Any
+
+from app import config
 
 # 默认单价（元 / 百万 token）。
 # ⚠️ DeepSeek 调价频繁且分高峰/空闲时段，请到官方定价页核对后，
@@ -36,13 +37,20 @@ MAX_RECORDS = 200
 # /stats 里展示几条最近记录
 RECENT_LIMIT = 20
 
+# 分钟级时间序列保留多少个桶。
+# 保留 24 小时（1440 个桶）—— 观测台要支持「最近 1 / 6 / 24 小时」切换。
+# 每个桶是 9 个浮点数，1440 个大约几百 KB，可以忽略；真正要控制的是**返回给
+# 前端多少条**，所以 summary() 支持按请求的范围切片，默认只回 60 条。
+TIMESERIES_MINUTES = 1440
+
+# /stats 默认返回多少分钟的序列
+DEFAULT_TIMESERIES_MINUTES = 60
+
 
 def _read_price(name: str, default: float) -> float:
     """延迟读取单价：确保 .env 已经加载完成，且允许运行时改配置后重启生效。"""
-    try:
-        value = float(os.getenv(name, "") or default)
-    except ValueError:
-        return default
+    value = config.env_float(name, default)
+    # 负单价没有任何意义（会把成本算成负数），当没填处理。
     return value if value >= 0 else default
 
 
@@ -147,6 +155,9 @@ class CallRecord:
     #    "diagnose 请求数"，指标名与含义不符。现在由调用方显式传入。
     llm_call: bool = False
     error: str = ""
+    # 关联标识：请求中间件生成，随响应头 X-Request-ID 一起返回。
+    # 有了它，「页面上看到的这一次点击」才能和 /stats 里的那条记录对上号。
+    request_id: str = ""
     # ---- Agent 模式专属（非 Agent 请求全部保持默认值，不参与统计）----
     # 加这些字段的原因：Agent 的行为特征（查不查工具、跑几轮）本身就是
     # 要观测的指标，混在通用指标里看不出来。
@@ -185,6 +196,7 @@ class CallRecord:
             "tokens_estimated": self.tokens_estimated,
             "cost": round(self.cost(), 6),
             "error": self.error,
+            "request_id": self.request_id,
         }
 
 
@@ -211,6 +223,12 @@ class MetricsStore:
         self._agent_rounds = 0
         self._agent_forced = 0
         self._agent_direct_answers = 0  # 一次工具都没调的 Agent 请求
+        # 端点聚合与分钟级时间序列：观测台的数据源
+        self._by_endpoint: dict[str, dict[str, float]] = {}
+        self._minutes: OrderedDict[str, dict[str, float]] = OrderedDict()
+        # 按天累计的花费：预算闸门用。**不随 reset() 清零** —— 否则调一次
+        # /stats/reset 就能绕过今日预算。
+        self._daily: dict[str, dict[str, float]] = {}
 
     def record(self, rec: CallRecord) -> None:
         with self._lock:
@@ -240,9 +258,137 @@ class MetricsStore:
             self._cached_prompt_tokens += rec.cached_prompt_tokens
             self._completion_tokens += rec.completion_tokens
             self._cost += rec.cost()
+            self._bump_endpoint(rec)
+            self._bump_minute(rec)
+            self._bump_daily(rec, rec.cost())
             self._records.append(rec)
 
-    def summary(self, recent_limit: int = RECENT_LIMIT) -> dict[str, Any]:
+    # ---- 聚合辅助（调用方必须已持有 self._lock）----
+    @staticmethod
+    def _empty_bucket() -> dict[str, float]:
+        return {
+            "requests": 0.0,
+            "errors": 0.0,
+            "llm_calls": 0.0,
+            "cache_hits": 0.0,
+            "duration_ms": 0.0,
+            "prompt_tokens": 0.0,
+            "completion_tokens": 0.0,
+            "cost": 0.0,
+            "agent_tool_calls": 0.0,
+        }
+
+    @staticmethod
+    def _bump(bucket: dict[str, float], rec: CallRecord) -> None:
+        bucket["requests"] += 1
+        if rec.error:
+            bucket["errors"] += 1
+        if rec.llm_call:
+            bucket["llm_calls"] += 1
+        if rec.cache_hit:
+            bucket["cache_hits"] += 1
+        bucket["duration_ms"] += rec.duration_ms
+        bucket["prompt_tokens"] += rec.prompt_tokens
+        bucket["completion_tokens"] += rec.completion_tokens
+        bucket["cost"] += rec.cost()
+        bucket["agent_tool_calls"] += rec.agent_tool_calls
+
+    def _bump_endpoint(self, rec: CallRecord) -> None:
+        self._bump(self._by_endpoint.setdefault(rec.endpoint, self._empty_bucket()), rec)
+
+    def _bump_minute(self, rec: CallRecord) -> None:
+        minute = time.strftime("%Y-%m-%dT%H:%M", time.localtime(rec.ts))
+        self._bump(self._minutes.setdefault(minute, self._empty_bucket()), rec)
+        while len(self._minutes) > TIMESERIES_MINUTES:
+            self._minutes.popitem(last=False)
+
+    def _bump_daily(self, rec: CallRecord, cost: float) -> None:
+        """按自然日累计花费（预算闸门的数据源）。调用方需持有锁。"""
+        day = time.strftime("%Y-%m-%d", time.localtime(rec.ts))
+        bucket = self._daily.setdefault(day, {"cost": 0.0, "requests": 0.0, "llm_calls": 0.0})
+        bucket["cost"] += cost
+        bucket["requests"] += 1
+        if rec.llm_call:
+            bucket["llm_calls"] += 1
+        # 只保留最近两天，长时间运行也不会无限增长
+        if len(self._daily) > 2:
+            for stale in sorted(self._daily)[:-2]:
+                self._daily.pop(stale, None)
+
+    def _endpoint_rows(self) -> list[dict[str, Any]]:
+        """按端点的聚合：哪个接口最贵、最慢、最容易出错。
+
+        观测台左侧那张表就是它 —— 出问题时第一眼看的是「哪个接口坏了」，
+        而不是「总平均耗时」。
+        """
+        rows: list[dict[str, Any]] = []
+        for name, bucket in sorted(
+            self._by_endpoint.items(), key=lambda kv: kv[1]["requests"], reverse=True
+        ):
+            requests = bucket["requests"]
+            rows.append(
+                {
+                    "endpoint": name,
+                    "requests": int(requests),
+                    "errors": int(bucket["errors"]),
+                    "llm_calls": int(bucket["llm_calls"]),
+                    "cache_hits": int(bucket["cache_hits"]),
+                    "avg_ms": round(bucket["duration_ms"] / requests, 2) if requests else 0.0,
+                    "cost": round(bucket["cost"], 6),
+                    "agent_tool_calls": int(bucket["agent_tool_calls"]),
+                }
+            )
+        return rows
+
+    def _timeseries_rows(self, limit: int = DEFAULT_TIMESERIES_MINUTES) -> list[dict[str, Any]]:
+        """按分钟的时间序列（只回最近 ``limit`` 个桶）。
+
+        内存里留 24 小时，但默认只回 60 条 —— 否则每 5 秒一次的轮询会把
+        1440 行 JSON（约 200KB）反复推给浏览器，纯属浪费。
+        """
+        items = list(self._minutes.items())
+        if limit and limit > 0:
+            items = items[-limit:]
+        return [
+            {
+                "minute": minute,
+                "requests": int(bucket["requests"]),
+                "errors": int(bucket["errors"]),
+                "llm_calls": int(bucket["llm_calls"]),
+                "cache_hits": int(bucket["cache_hits"]),
+                "prompt_tokens": int(bucket["prompt_tokens"]),
+                "completion_tokens": int(bucket["completion_tokens"]),
+                "cost": round(bucket["cost"], 6),
+            }
+            for minute, bucket in items
+        ]
+
+    def _daily_state(self) -> dict[str, Any]:
+        """今日累计花费与预算余量。调用方需持有锁。"""
+        day = time.strftime("%Y-%m-%d")
+        bucket = self._daily.get(day, {})
+        used = float(bucket.get("cost", 0.0))
+        limit = config.daily_budget_yuan()
+        return {
+            "date": day,
+            "used_yuan": round(used, 6),
+            "requests": int(bucket.get("requests", 0)),
+            "llm_calls": int(bucket.get("llm_calls", 0)),
+            "limit_yuan": limit,
+            "remaining_yuan": round(max(0.0, limit - used), 6) if limit > 0 else None,
+            "exceeded": bool(limit > 0 and used >= limit),
+        }
+
+    def daily_snapshot(self) -> dict[str, Any]:
+        """给预算闸门用的线程安全快照。"""
+        with self._lock:
+            return self._daily_state()
+
+    def summary(
+        self,
+        recent_limit: int = RECENT_LIMIT,
+        timeseries_minutes: int = DEFAULT_TIMESERIES_MINUTES,
+    ) -> dict[str, Any]:
         with self._lock:
             durations = sorted(r.duration_ms for r in self._records)
             recent = [r.to_dict() for r in list(self._records)[-recent_limit:]]
@@ -257,6 +403,9 @@ class MetricsStore:
             errors = self._errors
             estimated = self._estimated_calls
             started = self._started_at
+            by_endpoint = self._endpoint_rows()
+            timeseries = self._timeseries_rows(timeseries_minutes)
+            daily = self._daily_state()
 
         # 缓存命中率的分母是「需要诊断的请求」= 真的调了模型的 + 被缓存挡下来的。
         # 不能用 llm_calls 当分母 —— 修复 llm_calls 口径（不再计入缓存命中）之后，
@@ -304,6 +453,9 @@ class MetricsStore:
                 "currency": "CNY",
             },
             "agent": self._agent_summary(),
+            "by_endpoint": by_endpoint,
+            "timeseries": timeseries,
+            "daily": daily,
             "recent": recent,
         }
 
@@ -325,8 +477,13 @@ class MetricsStore:
             "note": "direct_answer_rate 高说明模型判断故障是通识、无需检索 —— 与 RAG 实验结论互为印证",
         }
 
-    def reset(self) -> None:
-        """清空统计（方便做对照实验：清零后跑一轮，看这一轮的数字）。"""
+    def reset(self, include_daily: bool = False) -> None:
+        """清空统计（方便做对照实验：清零后跑一轮，看这一轮的数字）。
+
+        ``include_daily`` 默认 **False**：`/stats/reset` 不能把「今日已花多少」
+        一起清掉，否则调一次重置就能绕过每日预算。只有测试需要彻底清场时
+        才显式传 True。
+        """
         with self._lock:
             self._records.clear()
             self._started_at = time.time()
@@ -345,6 +502,10 @@ class MetricsStore:
             self._agent_rounds = 0
             self._agent_forced = 0
             self._agent_direct_answers = 0
+            self._by_endpoint.clear()
+            self._minutes.clear()
+            if include_daily:
+                self._daily.clear()
 
 
 # 全局单例：整个进程共用一个

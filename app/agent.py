@@ -23,11 +23,10 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Generator
 from dataclasses import dataclass, field
 
-from app import metrics
+from app import config, metrics
 from app.diagnose import (
     CORRECTION_PROMPT,
     Usage,
@@ -45,7 +44,7 @@ from app.tools import TOOL_SCHEMAS, dispatch_tool
 
 # Agent Prompt 独立版本号：参与缓存键。改 AGENT_SYSTEM_PROMPT 或工具定义时 +1。
 # 与 PROMPT_VERSION 分开 —— 改诊断 Prompt 不该让 Agent 缓存失效，反之亦然。
-AGENT_PROMPT_VERSION = "a2"
+AGENT_PROMPT_VERSION = "a3"
 
 DEFAULT_MAX_TOOL_ROUNDS = 3
 
@@ -56,11 +55,7 @@ TRACE_RESULT_EXCERPT = 200
 
 def max_tool_rounds() -> int:
     """工具调用轮次上限（环境变量 LOGWISE_AGENT_MAX_ROUNDS，默认 3）。"""
-    try:
-        value = int(os.getenv("LOGWISE_AGENT_MAX_ROUNDS", DEFAULT_MAX_TOOL_ROUNDS))
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_TOOL_ROUNDS
-    return max(1, min(10, value))
+    return config.env_int("LOGWISE_AGENT_MAX_ROUNDS", DEFAULT_MAX_TOOL_ROUNDS, minimum=1, maximum=10)
 
 
 @dataclass
@@ -93,7 +88,8 @@ def build_agent_messages(logs: list[ParsedLog]) -> list[dict]:
     for ex in FEW_SHOT_EXAMPLES:
         messages.append({"role": "user", "content": ex["log"]})
         messages.append({"role": "assistant", "content": ex["diagnosis"]})
-    messages.append({"role": "user", "content": format_logs(logs)})
+    # 与 app/diagnose.build_messages 一致：日志用 <log> 包起来，标明这是数据不是指令
+    messages.append({"role": "user", "content": f"<log>\n{format_logs(logs)}\n</log>"})
     return messages
 
 

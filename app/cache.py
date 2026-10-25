@@ -16,11 +16,12 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import threading
 import time
 from collections import OrderedDict
+
+from app import config
 
 DEFAULT_TTL = 3600.0   # 秒
 DEFAULT_SIZE = 500     # 最多缓存多少条
@@ -28,29 +29,17 @@ DEFAULT_SIZE = 500     # 最多缓存多少条
 _WHITESPACE = re.compile(r"[ \t\u3000]+")
 
 
-def _flag(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in ("0", "false", "no", "off", "")
-
-
 def cache_enabled() -> bool:
-    return _flag("LOGWISE_CACHE_ENABLED", True)
+    return config.env_flag("LOGWISE_CACHE_ENABLED", True)
 
 
-def _ttl() -> float:
-    try:
-        return float(os.getenv("LOGWISE_CACHE_TTL", DEFAULT_TTL))
-    except ValueError:
-        return DEFAULT_TTL
+def cache_ttl() -> float:
+    """条目存活时间（秒）。允许 0 —— 测试用它验证「立即过期」的行为。"""
+    return config.env_float("LOGWISE_CACHE_TTL", DEFAULT_TTL, minimum=0.0)
 
 
-def _max_size() -> int:
-    try:
-        return max(1, int(os.getenv("LOGWISE_CACHE_SIZE", DEFAULT_SIZE)))
-    except ValueError:
-        return DEFAULT_SIZE
+def cache_max_size() -> int:
+    return config.env_int("LOGWISE_CACHE_SIZE", DEFAULT_SIZE, minimum=1)
 
 
 def normalize(text: str) -> str:
@@ -135,9 +124,9 @@ class DiagnosisCache:
             return
         now = time.time()
         with self._lock:
-            self._data[key] = (now + _ttl(), value)
+            self._data[key] = (now + cache_ttl(), value)
             self._data.move_to_end(key)
-            while len(self._data) > _max_size():
+            while len(self._data) > cache_max_size():
                 self._data.popitem(last=False)
                 self._evictions += 1
 
@@ -173,8 +162,8 @@ class DiagnosisCache:
             return {
                 "enabled": cache_enabled(),
                 "size": len(self._data),
-                "max_size": _max_size(),
-                "ttl_seconds": _ttl(),
+                "max_size": cache_max_size(),
+                "ttl_seconds": cache_ttl(),
                 "hits": self._hits,
                 "misses": self._misses,
                 "evictions": self._evictions,

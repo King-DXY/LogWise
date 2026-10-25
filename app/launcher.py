@@ -1,12 +1,14 @@
 """让脚本在「双击运行」时也能正确工作。
 
 Windows 上双击 .py 文件用的是系统全局 Python，而项目依赖只装在 .venv 里 ——
-直接双击会因为找不到依赖而失败。这里解决两件事：
+直接双击会因为找不到依赖而失败。这里解决三件事：
 
+0. ``setup_console()``   把 stdout 切成 UTF-8，否则 ✅/❌ 这类符号会直接抛
+                          UnicodeEncodeError（评测脚本跑到第一条结果就崩）
 1. ``reenter_venv()``   自动切到项目的 .venv 解释器重新执行本脚本
 2. ``pause_if_console()`` 结束前停一下，否则窗口一闪而过，看不到输出
 
-`run.py`、`build_index.py`、`eval_retrieval.py` 共用这两个函数，
+``run.py``、``build_index.py``、``eval_*.py``、``demo_*.py`` 共用这几个函数，
 避免同一段逻辑在多处各写一份、以后只改了一处。
 """
 from __future__ import annotations
@@ -19,11 +21,31 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 
+def setup_console() -> None:
+    """让中文和 ✅/❌ 这类符号在 Windows 控制台里正常输出。
+
+    Windows 的 stdout 默认编码是 GBK（cp936）。遇到 emoji 时 ``print`` 会抛
+    ``UnicodeEncodeError`` —— 表现不是"显示成乱码"，而是**脚本中途崩掉**：
+    评测跑完第一条结果就退出，看起来像"没跑完"或"卡住了"。
+
+    ``errors="replace"`` 是第二道保险：万一某个环境改不了编码，也只会显示成 ?，
+    不会中断运行。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def reenter_venv() -> None:
     """确保用项目自带的 .venv 解释器运行。
 
     已经是目标解释器时不做事，因此不会无限递归。
     """
+    # 先修控制台编码：后面任何一条 print（含 emoji）都依赖它
+    setup_console()
+
     venv_dir = ROOT / ".venv"
     venv_python = venv_dir / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     if not venv_python.exists():

@@ -15,6 +15,12 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
+      # 前端是「两个 HTML + 三个 JS」，改个 id 很容易漏掉另一侧引用 ——
+      # 这类错误 pytest 看不见，浏览器里表现为「点了没反应」。这里先拦一道。
+      - name: Frontend contract check
+        run: |
+          for f in static/assets/*.js; do node --check "$f"; done
+          node tools/check_frontend.mjs
       - name: Run tests
         run: python -m pytest tests/ -v
 
@@ -70,6 +76,15 @@ jobs:
 
           echo "--- 静态演示页 ---"
           curl -fsS http://localhost:8000/ | grep -q 'LogWise'
+
+          echo "--- 观测台 ---"
+          curl -fsS http://localhost:8000/dashboard.html | grep -q 'LogWise'
+
+          echo "--- 静态资源必须要求回源校验（否则改了前端看到的还是旧页面）---"
+          curl -fsSI http://localhost:8000/assets/ui.css | grep -qi 'cache-control: no-cache'
+
+          echo "--- 全局异常兜底：未捕获异常也要返回结构化错误 ---"
+          curl -fsS http://localhost:8000/health | grep -q '"status":"ok"'
 
           echo "--- 容器日志 ---"
           docker logs logwise-smoke

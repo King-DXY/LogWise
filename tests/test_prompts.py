@@ -54,6 +54,25 @@ class TestSystemPrompt:
         assert "根因" in SYSTEM_PROMPT and "症状" in SYSTEM_PROMPT
 
 
+class TestEvalHarnessConsistency:
+    """评测脚本自己拼 messages（为了支持 --from-git 历史 Prompt），
+    它必须与生产代码保持同一种日志包裹方式 —— 否则「评测测的就是线上跑的东西」
+    这句话就不成立，A/B 数据全部失效。
+    """
+
+    def test_eval_build_messages_wraps_logs_like_production(self):
+        import eval_diagnosis as ev
+
+        messages, _ = ev.build_messages(
+            "2026-01-01 00:00:00,000 ERROR [x] com.example.A - boom",
+            SYSTEM_PROMPT,
+            FEW_SHOT_EXAMPLES,
+            rag_mode="fixed",
+        )
+        assert messages[-1]["content"].startswith("<log>")
+        assert messages[-1]["content"].rstrip().endswith("</log>")
+
+
 class TestFewShotExamples:
     def test_has_multiple_examples(self):
         assert len(FEW_SHOT_EXAMPLES) >= 3, "示例太少，覆盖不了不同故障类型"

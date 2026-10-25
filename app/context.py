@@ -32,9 +32,9 @@ docs/EXPERIMENTS.md 第 4 节「上下文聚合」）在多日志故障场景下
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 
+from app import config
 from app.parser import ParsedLog
 
 # 默认参数。这两个值是**参数扫描**选出来的，不是拍脑袋定的：
@@ -53,17 +53,12 @@ ANCHOR_LEVELS = ("ERROR", "CRITICAL", "FATAL")
 
 
 def _flag(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() not in ("0", "false", "no", "off", "")
+    """布尔配置。解析规则统一在 app/config.py —— 这里只是转发。"""
+    return config.env_flag(name, default)
 
 
 def _int_env(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, default))
-    except (TypeError, ValueError):
-        return default
+    return config.env_int(name, default)
 
 
 def context_enabled() -> bool:

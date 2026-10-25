@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="dark">
+<title>LogWise · 观测台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%230b0f16'/%3E%3Cpath d='M4 12h3l2.5-6L13 19l3-9 1.5 2H20' fill='none' stroke='%2322d3ee' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/assets/ui.css">
+<link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round">
+        <path d="M3 12h3l2.5-6 3.5 13 3-9 2 2h4"/>
+      </svg>
+    </span>
+    <b>LogWise</b><span class="ver" id="verChip">v0.4 · api —</span>
+  </div>
+  <nav class="tabs">
+    <a href="/">工作台</a>
+    <a class="active" href="/dashboard.html">观测台</a>
+  </nav>
+  <div class="top-right">
+    <span class="chip" id="demoChip" hidden>演示数据</span>
+    <span class="chip" id="statusChip"><span class="dot"></span><span id="statusText">连接中</span></span>
+    <span class="chip" id="modelChip">model: …</span>
+    <button class="icon-btn" id="btnTheme" title="切换主题（暂只做深色）">☾</button>
+  </div>
+</header>
+
+<main class="page">
+  <div class="banner" id="staleBanner">
+    ⚠️ <b>服务端是旧版本</b> —— 这个页面用到的 <code>/stats</code> 字段可能还没生效。
+    关掉那个黑色命令行窗口，重新双击 <code>app\run.py</code> 即可。
+  </div>
+
+  <section class="head">
+    <div>
+      <h1>观测台</h1>
+      <p>花了多少钱、快不快、Agent 到底在干嘛</p>
+    </div>
+    <div class="tools">
+      <label class="switch" title="每 5 秒自动刷新一次">
+        <input type="checkbox" id="autoRefresh" checked><span>自动刷新 5s</span>
+      </label>
+      <select class="btn" id="rangeSel" title="曲线的时间范围">
+        <option value="1h">最近 1 小时</option>
+        <option value="6h">最近 6 小时</option>
+        <option value="24h">最近 24 小时</option>
+      </select>
+      <span class="hint" id="uptime">—</span>
+      <button class="btn" id="btnReset">重置统计</button>
+    </div>
+  </section>
+
+  <!-- 空态：一次诊断都没跑过时用这个，而不是四个大零 -->
+  <div class="empty" id="empty" hidden>
+    <div class="big">◔</div>
+    <h3>还没有任何调用记录</h3>
+    <p>去工作台粘贴一段日志跑一次，这里就会出现成本、缓存命中率和 Agent 行为。</p>
+    <a class="btn" href="/">去工作台 →</a>
+  </div>
+
+  <div id="content" hidden>
+    <div class="kpis" id="kpis">
+      <div class="card kpi">
+        <div class="label">请求总数</div>
+        <div class="value" id="kRequests">—</div>
+        <div class="foot" id="kRequestsFoot">—</div>
+      </div>
+      <div class="card kpi">
+        <div class="label">缓存命中率</div>
+        <div class="value" id="kCache">—</div>
+        <div class="bar"><i id="kCacheBar" style="width:0"></i></div>
+        <div class="foot" id="kCacheFoot">—</div>
+      </div>
+      <div class="card kpi">
+        <div class="label">总花费</div>
+        <div class="value" id="kCost">—</div>
+        <div class="foot" id="kCostFoot">—</div>
+      </div>
+      <div class="card kpi">
+        <div class="label">Agent 调用率</div>
+        <div class="value" id="kAgent">—</div>
+        <div class="foot" id="kAgentFoot">—</div>
+      </div>
+    </div>
+
+    <section class="card chart-card">
+      <div class="card-head">
+        <h2 id="chartTitle">成本与请求（最近 1 小时）</h2>
+        <div class="right">
+          <span class="badge" id="p95Badge">P95 —</span>
+          <span class="hint">按分钟聚合</span>
+        </div>
+      </div>
+      <div class="chart-body">
+        <svg id="chart" viewBox="0 0 1100 230" fill="none" preserveAspectRatio="none"
+             style="height:230px" aria-label="成本与请求趋势"></svg>
+      </div>
+      <div class="axis" id="chartAxis"><span>—</span><span>—</span><span>—</span></div>
+      <div class="legend-row">
+        <span><i style="background:#22d3ee"></i>每分钟花费（元）</span>
+        <span><i style="background:#a78bfa"></i>每分钟请求数</span>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2>最近调用</h2>
+        <div class="right"><span class="hint" id="recentHint">点行展开原始记录</span></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th class="mono">时间</th><th>端点</th>
+              <th class="mono">耗时</th><th class="mono">Token</th>
+              <th class="mono">成本</th><th>状态</th>
+            </tr>
+          </thead>
+          <tbody id="recentBody"></tbody>
+        </table>
+      </div>
+      <p class="foot-note">数据来自 <code>GET /stats</code> · 每行都带 <code>X-Request-ID</code>，可以和诊断页面对上号</p>
+    </section>
+  </div>
+</main>
+
+<div id="toast"></div>
+<script src="/assets/ui.js"></script>
+<script src="/assets/dashboard.js"></script>
+</body>
+</html>

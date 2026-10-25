@@ -43,12 +43,10 @@ ENTRY = "app/run.py"
 
 
 def _setup_console() -> None:
-    """让中文在 Windows 终端里正常显示。"""
-    for stream in (sys.stdout, sys.stderr):
-        try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
-        except Exception:
-            pass
+    """让中文在 Windows 终端里正常显示（实现统一在 app/launcher.py）。"""
+    from app.launcher import setup_console
+
+    setup_console()
 
 
 def _title(text: str) -> None:
@@ -220,6 +218,12 @@ def main() -> None:
 
     # 切到项目根目录：保证 static/ 与 .env 的相对路径正确
     os.chdir(ROOT)
+
+    # 结构化日志（一行一个 JSON）。放在这里而不是模块导入时，是为了让测试
+    # 环境保持安静 —— pytest 里不配置 handler，INFO 级别的请求日志就不会刷屏。
+    from app.logging_setup import configure
+
+    configure(os.getenv("LOGWISE_LOG_LEVEL", "INFO"))
 
     _title("LogWise · LLM 智能日志诊断助手")
     print(f"  Python  : {sys.version.split()[0]}  ({sys.executable})")

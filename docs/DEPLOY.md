@@ -149,6 +149,8 @@ LogWise/
 │   ├── retriever.py     # 检索层：BM25 / Dense / Hybrid（RRF 融合），后端可插拔
 │   ├── embedding.py     # 向量化客户端（OpenAI 兼容；带落盘缓存与优雅降级）
 │   ├── rag.py           # RAG 注入端：把检索到的案例拼进 Prompt
+│   ├── config.py        # 统一配置读取 + 生效配置回显（/config 的数据源）
+│   ├── logging_setup.py # 结构化日志：请求与异常都输出一行 JSON
 │   └── metrics.py       # 运行时度量：耗时 / token / 成本统计
 ├── data/                # 示例日志、评测集与知识库
 │   ├── sample.log               # 通用格式样例
@@ -160,9 +162,14 @@ LogWise/
 │   ├── eval_cases.json          # 诊断质量评测集（38 条人工标注用例，5 档难度）
 │   └── fault_cases.jsonl        # 故障案例知识库（56 条「日志 → 诊断」，供检索使用）
 ├── docs/                # 本目录：接口、部署、实验数据、踩坑记录
-├── static/index.html    # 演示页（static/samples/ 为示例日志）
+├── static/              # 前端（零构建：两个页面 + 一份共用设计系统）
+│   ├── index.html              # 工作台：粘贴日志 → 结构化诊断
+│   ├── dashboard.html          # 观测台：成本 / 缓存 / Agent 行为
+│   ├── assets/                 # ui.css + workbench.* + dashboard.*（两页共用）
+│   └── samples/                # 页面「填充示例」用的三份演示日志
+├── tools/               # 前端契约检查（CI 跑：id / 静态资源引用是否完整）
 ├── mcp_server.py        # MCP Server：把案例库暴露给任何 MCP 客户端（独立进程）
-├── tests/               # 单元测试（338 项）
+├── tests/               # 单元测试（381 项）
 │   ├── test_parser.py           # 解析器
 │   ├── test_context.py          # 上下文聚合
 │   ├── test_guard.py            # 鉴权 / 限流 / 缓存 / 度量
@@ -178,6 +185,7 @@ LogWise/
 │   ├── test_agent_langgraph.py  # LangGraph 对比实现（与手写版行为等价）
 │   ├── test_session.py          # 多轮追问（TTL / LRU / 轮数上限 / 失败回滚）
 │   ├── test_mcp_server.py       # MCP Server（工具注册 / 实际检索）
+│   ├── test_hardening.py        # 输入上限 / SSE 传输层 / 请求 ID / 生效配置
 │   └── test_api.py              # HTTP 接口层（含 SSE 断连不写缓存）
 ├── k8s/                 # Deployment / Service / HPA
 ├── demo_parse.py        # 演示：日志解析
