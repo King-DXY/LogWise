@@ -2,7 +2,7 @@
 
 粘贴一段线上报错日志 → LLM 返回结构化诊断（错误类型 / 根因 / 影响范围 / 排查步骤 / 置信度），SSE 流式输出。
 
-`Python 3.11` · `FastAPI` · `DeepSeek` · `Function Calling` · `pytest 303 项` · `Docker` · `Kubernetes`
+`Python 3.12` · `FastAPI` · `DeepSeek` · `Function Calling` · `LangGraph` · `MCP` · `pytest 338 项` · `Docker` · `Kubernetes`
 
 ---
 
@@ -16,6 +16,7 @@
 | 2 | Prompt 加 Few-shot、加 `evidence` 字段值不值？ | ✅ **采用** Prompt v3 | 成本 +80%，换来「信息不足时的诚实率」**50% → 100%**；证据零编造 59/59 |
 | 3 | RAG / 向量检索能提升诊断质量吗？ | ❌ **不采用**（默认关闭） | 三套后端都实现了：成本 **+53~81%**，准确率 **提升 0** |
 | 4 | 检不检索由代码写死，还是模型自己决定？ | ✅ **Agent 模式**（`/diagnose/agent`） | 3 个工具 + Function Calling 循环，轮次硬上限防成本失控、决策全程留痕；4 轮对照实验，假设被推翻两次后定型：**私有错误码组命中率 66.7% → 100%，通用故障组 0 次调用零干扰** —— 关键发现：模型对自身知识边界没有自知之明，需把边界写成 Prompt 硬规则，见 [EXPERIMENTS 7.3](docs/EXPERIMENTS.md) |
+| 5 | Agent 的决策过程要不要实时可见？ | ✅ **SSE 直播 + 多轮追问 + MCP** | `/diagnose/agent/stream` 逐轮推送工具调用（不再转圈干等）；诊断后可就同一上下文追问（30 分钟会话）；案例库另封装 MCP Server，任何 MCP 客户端可用 |
 
 第 3 条的结论是负面的，**但过程才是重点**：
 
@@ -47,6 +48,9 @@ python app\run.py        # 或直接在文件管理器里双击
 | --- | --- | --- |
 | 诊断一条日志 | 页面上粘贴，或 `POST /diagnose` | 约 0.001 元 |
 | Agent 模式（模型自主查工具） | 页面勾选「Agent 模式」，或 `POST /diagnose/agent` | 约 0.001~0.005 元 |
+| Agent 决策过程直播 | `POST /diagnose/agent/stream`（SSE，逐轮推送工具调用） | 同上 |
+| 诊断后继续追问 | 页面诊断结果下方的追问框，或 `POST /diagnose/followup` | 约 0.0005 元/次 |
+| 让别的 Agent 用你的案例库 | `python mcp_server.py`（MCP stdio server） | 免费 |
 | **看哪些日志被送给了模型** | 页面「上下文聚合」卡片，或 `POST /context` | 免费 |
 | 成本 / token / 缓存命中率 | <http://127.0.0.1:8000/stats> | 免费 |
 | 检索三后端对比 | 双击 `eval_retrieval.py` | 免费（缓存已热） |
@@ -80,6 +84,27 @@ DeepSeek 会自动缓存重复出现的 Prompt 前缀。最初按「全部输入
 
 单价不硬编码 —— DeepSeek 调价频繁且分高峰/空闲时段，`/stats` 会回显当前生效的单价。
 
+### Agent 工程化：可观测、可追问、可复用
+
+Agent 能跑通只是起点，下面四件事决定它能不能被真正用起来：
+
+| 能力 | 实现 | 关键取舍 |
+| --- | --- | --- |
+| **决策直播** | `POST /diagnose/agent/stream` | 同步生成器 + `iterate_in_threadpool` 桥接成 SSE；每轮工具调用执行完立刻推送，事件协议 `tool_call / delta / retry / done / error` |
+| **多轮追问** | `POST /diagnose/followup` | 会话内容 = 诊断时的完整 messages + 诊断结论，保证追问与诊断同一套上下文；30 分钟 TTL、最多保留 6 轮（越早的追问先裁掉） |
+| **MCP 复用** | `mcp_server.py` | 工具定义与 `app/tools.py` 同一份实现，只是换协议壳 —— 避免「两套工具逻辑漂移」 |
+| **框架对照** | `app/agent_langgraph.py` | 同一 Prompt / 同一工具 / 同一客户端，只把「手写循环」换成 LangGraph 状态图；测试验证四条路径行为等价 |
+
+> 框架对照不是「为了用框架而用框架」：主流程仍是手写循环（每行都知道为什么），
+> LangGraph 版用于回答「换编排层会改变什么」——这也是面试里最容易问到的部分。
+
+**已知取舍（不是 bug，是有意的边界）**：
+
+- Agent 的最终答案不是真 token 流式：模型本轮回答是非流式拿到的，前端按 48 字切块回放。
+  工具调用才是真正的实时推送 —— 用户等待的价值在「它在干什么」，不在逐字动画。
+- 会话存进程内存、单实例有效，重启即失效；多副本需换 Redis（与缓存、限流同一套取舍）。
+- 建会话时会重组一次 messages：`fixed` 模式下零开销，`dynamic/hybrid` 模式会多一次检索。
+
 ### 接口防护
 
 鉴权（`X-API-Key`，本机回环地址豁免）+ 令牌桶限流（默认 20 次/60 秒）+ 结果缓存。
@@ -102,7 +127,7 @@ DeepSeek 会自动缓存重复出现的 Prompt 前缀。最初按「全部输入
 
 | 文档 | 内容 |
 | --- | --- |
-| [docs/API.md](docs/API.md) | 7 个接口；GET 版有 32K 字符上限，长日志必须用 POST；鉴权 / 限流 / 缓存的设计理由 |
+| [docs/API.md](docs/API.md) | 10 个接口；GET 版有 32K 字符上限，长日志必须用 POST；鉴权 / 限流 / 缓存的设计理由 |
 | [docs/DEPLOY.md](docs/DEPLOY.md) | 一键启动、环境变量、Docker / Kubernetes、CI（含**容器冒烟测试**）、**项目结构** |
 | [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) | 全部 A/B 表格：Prompt 对比、参数扫描、检索质量、三后端对比、评测集设计 |
 | [docs/PITFALLS.md](docs/PITFALLS.md) | 23 条真实排障记录（SSE 阻塞、镜像缓存、Few-shot 幻觉、`zip` 静默截断、30 分钟默认超时…） |

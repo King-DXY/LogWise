@@ -44,6 +44,8 @@
   button:disabled { background: #94a3b8; cursor: not-allowed; }
   button.ghost { background: #fff; color: var(--muted); border: 1px solid #cbd5e1; font-weight: 400; }
   button.ghost:hover { background: #f8fafc; }
+  select.ghost { background: #fff; color: var(--muted); border: 1px solid #cbd5e1; border-radius: 8px; padding: 9px 10px; font-size: 13.5px; cursor: pointer; }
+  button.mini { padding: 4px 12px; font-size: 12.5px; font-weight: 400; }
   .agent-toggle { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--ink); cursor: pointer; user-select: none; padding: 6px 12px; border: 1px dashed #cbd5e1; border-radius: 8px; }
   .agent-toggle input { accent-color: var(--blue); width: 15px; height: 15px; }
   #tip { font-size: 13px; color: var(--faint); }
@@ -127,6 +129,11 @@
   .errbox-steps code { background: #fff; border: 1px solid #fecaca; padding: 1px 6px; border-radius: 4px; font-family: var(--mono); font-size: 12.5px; }
   .errbox-raw { margin-top: 8px; font-family: var(--mono); font-size: 11.5px; color: var(--faint); word-break: break-all; }
 
+  /* ---- 追问聊天气泡 ---- */
+  .chat-q { background: var(--blue-soft); border-radius: 8px; padding: 8px 12px; margin: 8px 0 4px; font-size: 14px; }
+  .chat-a { background: #f8fafc; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; margin: 4px 0 10px; font-size: 14px; line-height: 1.8; white-space: pre-wrap; word-break: break-word; }
+  .chat-cost { font-size: 11.5px; color: var(--faint); font-family: var(--mono); margin-top: 4px; }
+
   /* ---- 页脚 ---- */
   .footer { max-width: 960px; margin: 26px auto 40px; padding: 14px 24px 0; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--faint); display: flex; gap: 16px; flex-wrap: wrap; }
   .footer a { color: var(--muted); text-decoration: none; }
@@ -155,7 +162,13 @@
 2025-09-14 10:23:46,789 ERROR [main] app.db - 连接数据库超时
 ConnectionError: connect timeout"></textarea>
     <div class="btn-row">
-      <button id="btn" onclick="diagnose()">开始诊断</button>
+      <button id="btn" onclick="onDiagnoseClick()">开始诊断</button>
+      <select id="sampleSelect" class="ghost" title="一键填充演示日志">
+        <option value="">填充示例日志…</option>
+        <option value="demo_disk_full.log">磁盘写满（导出任务失败）</option>
+        <option value="demo_order_timeout.log">订单超时（多服务连锁报错）</option>
+        <option value="demo_pod_evicted.log">Pod 被驱逐（K8s 内存超限）</option>
+      </select>
       <label class="agent-toggle">
         <input type="checkbox" id="agentMode"> Agent 模式（模型自主决定是否查工具库）
       </label>
@@ -178,8 +191,18 @@ ConnectionError: connect timeout"></textarea>
 
   <!-- 诊断结果 -->
   <div class="card" id="diagCard">
-    <h3 id="diagTitle">诊断结果</h3>
+    <h3><span id="diagTitle">诊断结果</span><button id="copyBtn" class="ghost mini" style="display:none; margin-left:8px;" onclick="copyDiagnosis()">复制结果</button></h3>
     <div id="diagResult"></div>
+  </div>
+
+  <!-- 多轮追问 -->
+  <div class="card" id="followupCard">
+    <h3>追问（基于刚才的日志与诊断，30 分钟内有效）</h3>
+    <div id="chatList"></div>
+    <div style="display:flex; gap:8px; margin-top:10px;">
+      <input id="followupInput" type="text" placeholder="例如：第三步具体怎么操作？" style="flex:1; padding:9px 12px; border:1px solid #cbd5e1; border-radius:8px; font-size:14px;">
+      <button id="followupBtn" onclick="askFollowup()">发送</button>
+    </div>
   </div>
 
   <!-- 上下文聚合：辅助信息 -->
@@ -206,7 +229,7 @@ ConnectionError: connect timeout"></textarea>
 <div class="footer">
   <span>FastAPI + DeepSeek · 本地运行</span>
   <a href="/stats">成本 / token / 缓存命中率统计 →</a>
-  <span>API v3</span>
+  <span>API v5</span>
 </div>
 
 <script>
@@ -214,10 +237,24 @@ function esc(s) {
   return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+async function readErrorDetail(resp) {
+  const raw = await resp.text();
+  try {
+    const body = JSON.parse(raw);
+    return String(body.detail || body.error || raw);
+  } catch (e) {
+    return raw || ("HTTP " + resp.status);
+  }
+}
+
+function isAbortError(e) {
+  return e && e.name === "AbortError";
+}
+
 // ---- 服务端版本检测 ----
 // Python 代码在启动时载入内存，改了代码不重启就不生效；而网页文件是每次现读磁盘的。
 // 于是会出现「页面是新版、接口是旧版」这种很迷惑的状态 —— 这里主动把它识别出来讲清楚。
-const EXPECTED_API = "3";
+const EXPECTED_API = "5";
 const STALE_MSG = "服务端是旧版本，缺少这个接口。请关掉那个命令行窗口，重新双击 app\\run.py 后再试。";
 
 function isStale(status) { return status === 404 || status === 405; }
@@ -243,12 +280,55 @@ async function loadMeta() {
   } catch (e) { /* 保持占位 */ }
 }
 
+// 同一时间只允许一个诊断；请求 id 用来阻止旧响应覆盖新界面。
+let activeDiagnosis = null;
+
+function isActiveRun(run) {
+  return activeDiagnosis === run;
+}
+
+function assertActiveRun(run) {
+  if (!isActiveRun(run)) {
+    const e = new Error("诊断已取消");
+    e.name = "AbortError";
+    throw e;
+  }
+}
+
+function resetDiagnoseButton() {
+  const btn = document.getElementById("btn");
+  btn.disabled = false;
+  btn.textContent = "开始诊断";
+}
+
+function cancelDiagnosis(showFeedback = true) {
+  const run = activeDiagnosis;
+  if (run) {
+    activeDiagnosis = null;
+    run.controller.abort();
+    setSession(null);
+  }
+  resetDiagnoseButton();
+  if (run && showFeedback) {
+    document.getElementById("copyBtn").style.display = "none";
+    document.getElementById("diagResult").innerHTML = "<pre>已取消诊断。</pre>";
+  }
+}
+
+function onDiagnoseClick() {
+  if (activeDiagnosis) cancelDiagnosis();
+  else diagnose();
+}
+
 function clearAll() {
+  cancelDiagnosis(false);
   document.getElementById("logInput").value = "";
   ["ctxCard", "diagCard", "traceCard", "parseCard"].forEach(id => {
     document.getElementById(id).style.display = "none";
   });
   document.getElementById("parseCard").open = false;
+  document.getElementById("copyBtn").style.display = "none";
+  setSession(null);
   document.getElementById("ctxList").innerHTML = "";
   document.getElementById("ctxSummary").textContent = "";
   document.getElementById("ctxHint").textContent = "";
@@ -446,154 +526,392 @@ function renderDiagnosis(d, usage) {
     ${usageHtml}`;
 }
 
-// ---------------- Agent 模式 ----------------
-async function diagnoseAgent(text) {
+// ---------------- 多轮追问 ----------------
+let sessionId = null;  // 当前诊断会话（诊断接口返回，换日志就作废）
+let followupRequest = null;
+
+function setSession(id) {
+  if (followupRequest) {
+    followupRequest.controller.abort();
+    followupRequest = null;
+  }
+  sessionId = id || null;
+  const card = document.getElementById("followupCard");
+  const input = document.getElementById("followupInput");
+  const btn = document.getElementById("followupBtn");
+  card.style.display = sessionId ? "block" : "none";
+  input.disabled = !sessionId;
+  btn.disabled = !sessionId;
+  document.getElementById("chatList").innerHTML = "";
+}
+
+async function askFollowup() {
+  if (followupRequest) return;
+  const input = document.getElementById("followupInput");
+  const q = input.value.trim();
+  if (!q || !sessionId) return;
+  const btn = document.getElementById("followupBtn");
+  const list = document.getElementById("chatList");
+  const request = { controller: new AbortController(), sid: sessionId };
+  followupRequest = request;
+  btn.disabled = true;
+  list.insertAdjacentHTML("beforeend", `<div class="chat-q">🙋 ${esc(q)}</div>`);
+  const aId = "a" + Date.now();
+  list.insertAdjacentHTML("beforeend", `<div class="chat-a" id="${aId}">思考中…</div>`);
+  input.value = "";
+  const aEl = document.getElementById(aId);
+  try {
+    const r = await fetch("/diagnose/followup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_id: request.sid, question: q }),
+      signal: request.controller.signal,
+    });
+    if (followupRequest !== request) return;
+    if (!r.ok) {
+      const detail = await readErrorDetail(r);
+      if (followupRequest !== request) return;
+      aEl.textContent = "追问失败：" + detail;
+      if (r.status === 404) {
+        sessionId = null;  // 保留错误信息，禁止继续追问，直到重新诊断。
+        input.disabled = true;
+        btn.disabled = true;
+      }
+      return;
+    }
+    const j = await r.json();
+    if (followupRequest !== request) return;
+    aEl.textContent = j.answer;
+    const u = j.usage;
+    aEl.insertAdjacentHTML("beforeend",
+      `<div class="chat-cost">输入 ${u.prompt_tokens} tok（缓存命中 ${u.cached_tokens}）＋ 输出 ${u.completion_tokens} tok</div>`);
+  } catch (e) {
+    if (followupRequest === request && !isAbortError(e)) {
+      aEl.textContent = "追问失败: " + e;
+    }
+  } finally {
+    if (followupRequest === request) {
+      followupRequest = null;
+      btn.disabled = !sessionId;
+      input.disabled = !sessionId;
+      if (sessionId) input.focus();
+    }
+  }
+}
+document.getElementById("followupInput").addEventListener("keydown", e => {
+  if (e.key === "Enter") askFollowup();
+});
+
+// ---------------- SSE 读取辅助 ----------------
+// 逐行读出 SSE 事件，回调拿到 JSON.parse 后的 data；[DONE] 时结束。
+async function readSSE(resp, onEvent) {
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const data = line.slice(6);
+      if (data === "[DONE]") return true;
+      let parsed;
+      try {
+        parsed = JSON.parse(data);
+      } catch (e) {
+        throw new Error("收到无法解析的服务器事件");
+      }
+      onEvent(parsed);
+    }
+  }
+  return false;  // 没收到 [DONE] 就 EOF，属于连接中断而不是成功。
+}
+
+// ---------------- Agent 模式（SSE 流式，实时渲染决策过程） ----------------
+async function diagnoseAgent(text, run) {
   const diagRes = document.getElementById("diagResult");
+  const traceCard = document.getElementById("traceCard");
+  const traceList = document.getElementById("traceList");
+  traceList.innerHTML = "";
+  let preEl = null;
+
+  function appendToolRound(round, calls) {
+    traceCard.style.display = "block";
+    const callsHtml = (calls || []).map(c =>
+      `<div class="tl-body"><span class="tl-tool">🔧 ${esc(c.name)}</span><span>${esc(fmtArgs(c.arguments))}</span>
+       <div class="tl-result">返回：${esc(c.result_excerpt || "")}</div></div>`
+    ).join("");
+    traceList.insertAdjacentHTML("beforeend",
+      `<div class="tl-item"><div class="tl-dot">●</div>
+       <div class="tl-title">第 ${round} 轮 · 模型判断信息不足，调用工具</div>${callsHtml}</div>`);
+  }
+
+  let firstEvent = false;
   const t0 = Date.now();
   const timer = setInterval(() => {
-    diagRes.innerHTML = `<pre>Agent 思考中（可能正在调用工具）… 已等待 ${Math.round((Date.now() - t0) / 1000)} 秒</pre>`;
+    if (!firstEvent && isActiveRun(run)) {
+      diagRes.innerHTML = `<pre>Agent 思考中（可能正在调用工具）… 已等待 ${Math.round((Date.now() - t0) / 1000)} 秒</pre>`;
+    }
   }, 500);
+
   try {
-    const resp = await fetch("/diagnose/agent", {
+    const resp = await fetch("/diagnose/agent/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
+      signal: run.controller.signal,
     });
-    clearInterval(timer);
+    assertActiveRun(run);
     if (!resp.ok) {
+      const detail = await readErrorDetail(resp);
+      assertActiveRun(run);
       if (isStale(resp.status)) { showStale(); diagRes.innerHTML = `<pre>${STALE_MSG}</pre>`; }
-      else diagRes.innerHTML = friendlyError(resp.status, await resp.text());
+      else diagRes.innerHTML = friendlyError(resp.status, detail);
       return;
     }
-    const j = await resp.json();
-    if (j.error) { diagRes.innerHTML = `<pre>${esc(j.error)}</pre>`; return; }
-    renderTrace(j.trace, j.usage);
-    const cardHtml = renderDiagnosis(j.diagnosis, j.usage);
+    let donePayload = null;
+    let streamError = "";
+    const completed = await readSSE(resp, ev => {
+      if (!isActiveRun(run)) return;
+      firstEvent = true;
+      if (ev.type === "tool_call") {
+        appendToolRound(ev.round, ev.tool_calls);
+      } else if (ev.type === "delta") {
+        if (!preEl) { diagRes.innerHTML = "<pre></pre>"; preEl = diagRes.querySelector("pre"); }
+        preEl.textContent += ev.text;
+      } else if (ev.type === "retry") {
+        if (!preEl) { diagRes.innerHTML = "<pre></pre>"; preEl = diagRes.querySelector("pre"); }
+        preEl.textContent = "（输出格式不合格，已自动纠错重试）";
+      } else if (ev.type === "error") {
+        streamError = ev.message || "Agent 诊断失败";
+        diagRes.innerHTML = friendlyError(502, streamError);
+      } else if (ev.type === "done") {
+        donePayload = ev;
+      }
+    });
+    assertActiveRun(run);
+    if (!completed && !streamError) throw new Error("连接中断，未收到完整诊断结果");
+    if (streamError || !donePayload) return;
+
+    renderTrace(donePayload.trace, donePayload.usage);
+    const cardHtml = renderDiagnosis(donePayload.diagnosis, donePayload.usage);
     diagRes.innerHTML = cardHtml
-      ? cardHtml + (j.cached ? '<div class="cost-chip">（命中缓存，本次未消耗 token；用量为首次生成时的记录）</div>' : "")
-      : `<pre>${esc(JSON.stringify(j.diagnosis, null, 2))}</pre>`;
+      ? cardHtml + (donePayload.cached ? '<div class="cost-chip">（命中缓存，本次未消耗 token；用量为首次生成时的记录）</div>' : "")
+      : `<pre>${esc(JSON.stringify(donePayload.diagnosis, null, 2))}</pre>`;
+    document.getElementById("copyBtn").style.display = "inline-block";
+    if (donePayload.session_id) setSession(donePayload.session_id);
   } catch (e) {
+    if (isActiveRun(run) && !isAbortError(e)) {
+      diagRes.innerHTML = `<pre>诊断失败: ${esc(String(e))}</pre>`;
+    }
+  } finally {
     clearInterval(timer);
-    diagRes.innerHTML = `<pre>诊断失败: ${esc(String(e))}</pre>`;
   }
 }
 
-// ---------------- 主流程 ----------------
-async function diagnose() {
-  const text = document.getElementById("logInput").value.trim();
-  if (!text) return alert("请先粘贴日志");
-  const btn = document.getElementById("btn");
-  const parseRes = document.getElementById("parseResult");
-  const diagRes = document.getElementById("diagResult");
-  btn.disabled = true;
-  document.getElementById("parseCard").style.display = "block";
-  document.getElementById("diagCard").style.display = "block";
-  document.getElementById("traceCard").style.display = "none";
-  parseRes.textContent = "解析中...";
-  diagRes.innerHTML = "";
+// ---------------- 示例日志一键填充 ----------------
+document.getElementById("sampleSelect").addEventListener("change", async e => {
+  const file = e.target.value;
+  e.target.value = "";  // 允许连续选同一个示例
+  if (!file) return;
+  cancelDiagnosis(false);
+  setSession(null);
+  try {
+    const r = await fetch("/samples/" + file);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const text = await r.text();
+    document.getElementById("logInput").value = text;
+    parseLoadedFor = "";
+    document.getElementById("diagResult").innerHTML = "";
+    document.getElementById("traceList").innerHTML = "";
+    ["diagCard", "traceCard", "ctxCard", "parseCard"].forEach(id => {
+      document.getElementById(id).style.display = "none";
+    });
+    document.getElementById("copyBtn").style.display = "none";
+    document.getElementById("logInput").focus();
+  } catch (err) {
+    alert("示例加载失败: " + err);
+  }
+});
 
-  // 1) 解析接口
+// ---------------- 复制诊断结果 ----------------
+function copyDiagnosis() {
+  const text = document.getElementById("diagResult").innerText;
+  navigator.clipboard.writeText(text).then(() => {
+    const b = document.getElementById("copyBtn");
+    b.textContent = "已复制 ✓";
+    setTimeout(() => { b.textContent = "复制结果"; }, 1500);
+  });
+}
+
+// ---------------- 解析结果：展开时才请求（懒加载） ----------------
+// 之前每次诊断都打 /parse + /context + /diagnose 三个接口，同一段日志后端解析三遍，
+// 还吃三个限流令牌。解析结果多数人根本不展开看，所以改成展开时才加载。
+let parseLoadedFor = "";  // 已加载的日志文本（避免重复请求）
+async function loadParseResult() {
+  const text = document.getElementById("logInput").value.trim();
+  if (!text || text === parseLoadedFor) return;
+  const parseRes = document.getElementById("parseResult");
+  parseRes.textContent = "解析中...";
   try {
     const p = await fetch("/parse", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     });
+    if (!p.ok) throw new Error(await readErrorDetail(p));
     const pj = await p.json();
+    // 请求期间日志可能已被替换，旧响应不能覆盖新输入对应的解析结果。
+    if (document.getElementById("logInput").value.trim() !== text) return;
+    if (!Array.isArray(pj.logs)) throw new Error("服务返回的解析结果格式不正确");
     parseRes.textContent = JSON.stringify(pj.logs, null, 2);
+    parseLoadedFor = text;
   } catch (e) {
-    parseRes.textContent = "解析失败: " + e;
-  }
-
-  // 2) 上下文聚合预览（不调用模型，不花钱）
-  try {
-    const c = await fetch("/context", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
-    if (isStale(c.status)) {
-      showStale();
-      document.getElementById("ctxSummary").textContent = STALE_MSG;
-      document.getElementById("ctxHint").textContent = "";
-      document.getElementById("ctxList").innerHTML = "";
-      document.getElementById("ctxCard").style.display = "block";
-    } else {
-      renderContext(await c.json());
+    if (document.getElementById("logInput").value.trim() === text) {
+      parseRes.textContent = "解析失败: " + e;
     }
-  } catch (e) {
-    document.getElementById("ctxSummary").textContent = "上下文预览失败: " + e;
   }
+}
+document.getElementById("parseCard").addEventListener("toggle", e => {
+  if (e.target.open) loadParseResult();
+});
 
-  // 3) Agent 模式：一次性接口，展示决策时间线；否则走 SSE 流式
-  if (document.getElementById("agentMode").checked) {
-    document.getElementById("diagTitle").textContent = "诊断结果（Agent 模式）";
-    diagRes.innerHTML = "<pre>Agent 思考中（可能正在调用工具）…</pre>";
-    await diagnoseAgent(text);
-    btn.disabled = false;
-    return;
-  }
-  document.getElementById("diagTitle").textContent = "诊断结果（流式）";
+// ---------------- 主流程 ----------------
+async function diagnose() {
+  if (activeDiagnosis) return;  // Ctrl+Enter 也不能绕过防重入
+  const text = document.getElementById("logInput").value.trim();
+  if (!text) return alert("请先粘贴日志");
+  const run = { controller: new AbortController() };
+  activeDiagnosis = run;
+  const btn = document.getElementById("btn");
+  const parseRes = document.getElementById("parseResult");
+  const diagRes = document.getElementById("diagResult");
+  btn.textContent = "取消诊断";
+  document.getElementById("parseCard").style.display = "block";
+  document.getElementById("diagCard").style.display = "block";
+  document.getElementById("traceCard").style.display = "none";
+  document.getElementById("copyBtn").style.display = "none";
+  setSession(null);  // 新一次诊断，旧会话作废（新的 session_id 会随结果回来）
+  // 解析卡片重置为「未加载」：文本变了，之前加载的结果已过期
+  parseLoadedFor = "";
+  parseRes.textContent = "（点击展开后自动加载）";
+  diagRes.innerHTML = "";
 
-  // SSE 流式诊断接口
-  //    用 POST 而不是 GET：日志放 URL 里会有长度上限（实测约 32K 字符），
-  //    粘贴长日志时会被服务器以 400 拒绝。
   try {
+    // 1) 上下文聚合预览（不调用模型，不花钱）。预览失败不阻断后续诊断。
+    try {
+      const c = await fetch("/context", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+        signal: run.controller.signal,
+      });
+      assertActiveRun(run);
+      if (!c.ok) throw new Error(await readErrorDetail(c));
+      assertActiveRun(run);
+      const contextPayload = await c.json();
+      assertActiveRun(run);
+      renderContext(contextPayload);
+    } catch (e) {
+      if (isAbortError(e)) throw e;
+      if (isActiveRun(run)) {
+        document.getElementById("ctxSummary").textContent = "上下文预览失败: " + e;
+        document.getElementById("ctxHint").textContent = "";
+        document.getElementById("ctxList").innerHTML = "";
+        document.getElementById("ctxCard").style.display = "block";
+      }
+    }
+    assertActiveRun(run);
+
+    // 2) Agent 模式展示决策时间线；普通模式走 SSE 流式。
+    if (document.getElementById("agentMode").checked) {
+      document.getElementById("diagTitle").textContent = "诊断结果（Agent 模式）";
+      diagRes.innerHTML = "<pre>Agent 思考中（可能正在调用工具）…</pre>";
+      await diagnoseAgent(text, run);
+      return;
+    }
+    document.getElementById("diagTitle").textContent = "诊断结果（流式）";
+
+    // 用 POST 而不是 GET：日志放 URL 有长度上限，长日志会被服务器拒绝。
     const resp = await fetch("/diagnose/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
+      signal: run.controller.signal,
     });
+    assertActiveRun(run);
     if (!resp.ok) {
       if (isStale(resp.status)) {
         showStale();
         diagRes.innerHTML = `<pre>${STALE_MSG}</pre>`;
       } else {
-        diagRes.innerHTML = friendlyError(resp.status, await resp.text());
+        const detail = await readErrorDetail(resp);
+        assertActiveRun(run);
+        diagRes.innerHTML = friendlyError(resp.status, detail);
       }
-      btn.disabled = false;
       return;
     }
+
     diagRes.innerHTML = "<pre></pre>";
     const preEl = diagRes.querySelector("pre");
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split("\n");
-      buf = lines.pop();
-      for (const line of lines) {
-        if (line.startsWith("data: ")) {
-          const data = line.slice(6);
-          if (data === "[DONE]") continue;
-          try {
-            preEl.textContent += JSON.parse(data);
-          } catch (e) { /* 忽略不完整的行 */ }
-        }
+    let fullText = "";
+    let streamError = "";
+    const completed = await readSSE(resp, parsed => {
+      if (!isActiveRun(run)) return;
+      // delta 是 JSON 字符串；错误 / 会话事件是 JSON 对象。
+      if (typeof parsed === "string") {
+        fullText += parsed;
+        preEl.textContent = fullText;
+      } else if (parsed.session_id) {
+        setSession(parsed.session_id);
+      } else if (parsed.error) {
+        streamError = parsed.error;
       }
+    });
+    assertActiveRun(run);
+    if (!completed && !streamError) throw new Error("连接中断，未收到完整诊断结果");
+    if (streamError) {
+      const legacy = fullText.match(/^\[诊断出错\] ([\s\S]*)$/);
+      diagRes.innerHTML = friendlyError(502, streamError || (legacy && legacy[1]));
+      return;
     }
-    // 流式输出结束后，把裸 JSON 替换成结构化卡片 —— 演示时一眼能看清结论
+
+    const legacyError = fullText.match(/^\[诊断出错\] ([\s\S]*)$/);
+    if (legacyError) {
+      diagRes.innerHTML = friendlyError(502, legacyError[1]);
+      return;
+    }
+
+    // 只有收到 [DONE] 且拿到完整合法 JSON 才展示成功卡片。
+    let diagnosis;
     try {
-      const cardHtml = renderDiagnosis(JSON.parse(preEl.textContent));
-      if (cardHtml) diagRes.innerHTML = cardHtml;
+      diagnosis = JSON.parse(fullText);
     } catch (e) {
-      // 不是完整 JSON：如果是流内报错（[诊断出错]...），换成友好提示框
-      const txt = preEl.textContent;
-      const m = txt.match(/^\[诊断出错\] ([\s\S]*)$/);
-      if (m) diagRes.innerHTML = friendlyError(502, m[1]);
+      throw new Error("模型输出不完整或不是合法 JSON，请重试");
     }
+    const cardHtml = renderDiagnosis(diagnosis);
+    if (!cardHtml) throw new Error("模型输出缺少必要诊断字段，请重试");
+    diagRes.innerHTML = cardHtml;
+    document.getElementById("copyBtn").style.display = "inline-block";
   } catch (e) {
-    diagRes.innerHTML = `<pre>诊断失败: ${esc(String(e))}</pre>`;
+    if (isActiveRun(run) && !isAbortError(e)) {
+      document.getElementById("copyBtn").style.display = "none";
+      diagRes.innerHTML = `<pre>诊断失败: ${esc(String(e))}</pre>`;
+    }
+  } finally {
+    if (isActiveRun(run)) {
+      activeDiagnosis = null;
+      resetDiagnoseButton();
+    }
   }
-  btn.disabled = false;
 }
 
 // Ctrl+Enter 快速诊断
 document.getElementById("logInput").addEventListener("keydown", e => {
-  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") diagnose();
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") onDiagnoseClick();
 });
 
 checkServerVersion();

@@ -76,6 +76,25 @@ def price_output() -> float:
     return _read_price("DEEPSEEK_PRICE_OUTPUT", _DEFAULT_PRICE_OUTPUT)
 
 
+def usage_cost(usage) -> float:
+    """按三档单价计算一次诊断的成本，供所有接口与评测复用。"""
+    return (
+        usage.uncached_prompt_tokens / 1_000_000 * price_input()
+        + usage.cached_tokens / 1_000_000 * price_input_cached()
+        + usage.completion_tokens / 1_000_000 * price_output()
+    )
+
+
+def usage_payload(usage) -> dict[str, int | float]:
+    """统一的接口用量契约，避免同步与流式路径字段漂移。"""
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "cached_tokens": usage.cached_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "cost_yuan": round(usage_cost(usage), 6),
+    }
+
+
 def estimate_tokens(text: str) -> int:
     """粗略估算 token 数，用于流式响应拿不到 usage 时的兜底。
 

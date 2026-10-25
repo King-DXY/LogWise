@@ -20,19 +20,23 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from starlette.concurrency import run_in_threadpool
+from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app import cache as cache_mod
 from app import context as context_mod
 from app import guard, metrics, rag
+from app import session as session_mod
 from app.context import LogContext, build_context, describe
 from app.diagnose import (
     PROMPT_VERSION,
     Usage,
+    _parse_json,
+    build_messages,
     current_model,
     diagnose_multi_ex,
     format_logs,
     prompt_char_size,
+    schema_problems,
     stream_diagnosis_multi,
 )
 from app.parser import ParsedLog, parse_text
@@ -78,13 +82,20 @@ class TextRequest(BaseModel):
     text: str
 
 
+class FollowUpRequest(BaseModel):
+    """追问请求：session_id 定位会话，question 是用户的问题。"""
+
+    session_id: str
+    question: str
+
+
 # --------------------------------------------------------------------------- #
 # 基础接口
 # --------------------------------------------------------------------------- #
 # 接口契约版本。改了路由签名或响应结构就 +1 —— 前端拿它做「服务端是不是旧版」的握手。
 # 用 /health 而不是某个业务接口来做这件事，是因为它不计度量、也不受限流，
 # 前端每次刷新页面探测一次不会污染 /stats 的请求数，也不会吃掉限流额度。
-API_REVISION = "3"
+API_REVISION = "5"
 
 
 @app.get("/health")
@@ -108,6 +119,7 @@ def stats():
         "rag": rag.describe(),
         "metrics": metrics.store.summary(),
         "cache": cache_mod.cache.snapshot(),
+        "sessions": session_mod.store.snapshot(),
         "rate_limit": guard.limiter.snapshot(),
     }
 
@@ -231,14 +243,18 @@ def diagnose(req: DiagnoseRequest):
     context = build_context(logs)
     key = _cache_key(req.text, context)
 
-    cached_text = cache_mod.cache.get(key)
-    if cached_text is not None:
+    cached_result = _read_cached_diagnosis(key)
+    if cached_result is not None:
         _record("/diagnose", started, cache_hit=True)
+        # 缓存命中也建会话（零模型开销）—— 否则命中缓存的诊断没法追问
+        result = cached_result
+        session_id = session_mod.store.create(build_messages(context.logs), result)
         return {
             "log": target.__dict__,
             "context": describe(context),
-            "diagnosis": json.loads(cached_text),
+            "diagnosis": result,
             "cached": True,
+            "session_id": session_id,
         }
 
     error = ""
@@ -258,11 +274,14 @@ def diagnose(req: DiagnoseRequest):
 
     # 只缓存模型输出，日志结构本身由解析器决定，没必要一起存
     cache_mod.cache.set(key, json.dumps(result, ensure_ascii=False))
+    # 建会话：以「诊断时的完整 messages + 诊断结论」为底子，支撑多轮追问
+    session_id = session_mod.store.create(build_messages(context.logs), result)
     return {
         "log": target.__dict__,
         "context": describe(context),
         "diagnosis": result,
         "cached": False,
+        "session_id": session_id,
     }
 
 
@@ -280,7 +299,7 @@ def diagnose_agent(req: DiagnoseRequest):
     缓存键用 AGENT_PROMPT_VERSION 而非 PROMPT_VERSION：
     两套 Prompt 独立演进，缓存互不干扰。
     """
-    from app.agent import AGENT_PROMPT_VERSION, run_agent
+    from app.agent import AGENT_PROMPT_VERSION, build_agent_messages, run_agent
 
     started = time.perf_counter()
 
@@ -299,14 +318,16 @@ def diagnose_agent(req: DiagnoseRequest):
         rag_signature="agent",
     )
 
-    cached_text = cache_mod.cache.get(key)
-    if cached_text is not None:
+    payload = _read_cached_agent(key)
+    if payload is not None:
         _record("/diagnose/agent", started, cache_hit=True)
+        session_id = session_mod.store.create(build_agent_messages(context.logs), payload["diagnosis"])
         return {
             "log": target.__dict__,
             "context": describe(context),
-            **json.loads(cached_text),
+            **payload,
             "cached": True,
+            "session_id": session_id,
         }
 
     error = ""
@@ -333,29 +354,20 @@ def diagnose_agent(req: DiagnoseRequest):
     if error:
         raise HTTPException(status_code=502, detail=f"模型调用失败：{error}")
 
-    # 用量与成本随响应返回 —— 「每次调用花了多少钱」是这个项目的核心叙事，
-    # 只在 /stats 里看聚合值不够直观，单次请求就该能看到。
-    cost = (
-        usage.uncached_prompt_tokens / 1_000_000 * metrics.price_input()
-        + usage.cached_tokens / 1_000_000 * metrics.price_input_cached()
-        + usage.completion_tokens / 1_000_000 * metrics.price_output()
-    )
+    # 用量与成本随响应返回；同步、流式与缓存回放共用同一份序列化契约。
     payload = {
         "diagnosis": result,
         "trace": trace,
-        "usage": {
-            "prompt_tokens": usage.prompt_tokens,
-            "cached_tokens": usage.cached_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "cost_yuan": round(cost, 6),
-        },
+        "usage": metrics.usage_payload(usage),
     }
     cache_mod.cache.set(key, json.dumps(payload, ensure_ascii=False))
+    session_id = session_mod.store.create(build_agent_messages(context.logs), result)
     return {
         "log": target.__dict__,
         "context": describe(context),
         **payload,
         "cached": False,
+        "session_id": session_id,
     }
 
 
@@ -392,7 +404,7 @@ def _stream_response(text: str) -> StreamingResponse:
     if not logs:
         _record("/diagnose/stream", started, error=NO_LOG_MSG)
         return StreamingResponse(
-            iter([_sse(json.dumps({"error": NO_LOG_MSG}, ensure_ascii=False)), SSE_DONE]),
+            iter([_sse_obj({"error": NO_LOG_MSG}), SSE_DONE]),
             media_type="text/event-stream",
         )
 
@@ -401,13 +413,17 @@ def _stream_response(text: str) -> StreamingResponse:
     key = _cache_key(text, context)
 
     # ---- 缓存命中：把完整结果切块吐出去，保持"逐字出现"的观感 ----
-    cached_text = cache_mod.cache.get(key)
-    if cached_text is not None:
+    cached_result = _read_cached_diagnosis(key)
+    if cached_result is not None:
         _record("/diagnose/stream", started, cache_hit=True)
+        cached_text = json.dumps(cached_result, ensure_ascii=False)
 
         async def replay():
             for piece in cache_mod.chunk_text(cached_text):
                 yield _sse(piece)
+            # 缓存已通过 schema 校验，可以安全创建追问会话。
+            sid = session_mod.store.create(build_messages(context.logs), cached_result)
+            yield _sse_obj({"session_id": sid})
             yield SSE_DONE
 
         return StreamingResponse(replay(), media_type="text/event-stream")
@@ -417,22 +433,35 @@ def _stream_response(text: str) -> StreamingResponse:
 
     async def gen():
         collected: list[str] = []
+        full_text = ""
         error = ""
         estimated = False
         try:
             async for delta in stream_diagnosis_multi(context.logs, usage):
                 collected.append(delta)
                 yield _sse(delta)
+
+            # 完整 JSON 不等于合格诊断：字段校验通过后才允许缓存和创建会话。
+            full_text = "".join(collected)
+            try:
+                result = _parse_json(full_text)
+                problems = schema_problems(result)
+            except json.JSONDecodeError:
+                problems = ["返回的内容不是合法 JSON"]
+            if problems:
+                error = f"模型输出不符合格式（{'；'.join(problems)}）"
+                yield _sse_obj({"error": error})
+            else:
+                cache_mod.cache.set(key, json.dumps(result, ensure_ascii=False))
+                sid = session_mod.store.create(build_messages(context.logs), result)
+                yield _sse_obj({"session_id": sid})
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             yield _sse(f"[诊断出错] {error}")
         finally:
-            # 放在 finally：即使客户端中途断开，也要留下度量记录
-            full_text = "".join(collected)
-            if not error and full_text:
-                cache_mod.cache.set(key, _canonical(full_text))
+            # finally 只记录度量；缓存写入只能发生在完整校验成功之后。
+            full_text = full_text or "".join(collected)
             if not usage.total and full_text:
-                # DeepSeek 实测会返回真实 usage，这里只是保险
                 estimated = True
                 usage.completion_tokens = metrics.estimate_tokens(full_text)
                 usage.prompt_tokens = metrics.estimate_tokens_from_chars(prompt_char_size(context.logs))
@@ -442,11 +471,164 @@ def _stream_response(text: str) -> StreamingResponse:
                 usage=usage,
                 error=error,
                 tokens_estimated=estimated,
-                llm_call=True,  # 走到这里就说明真的发起过流式调用了
+                llm_call=True,
             )
         yield SSE_DONE
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# --------------------------------------------------------------------------- #
+# 诊断（Agent 模式：SSE 流式，实时推送每轮工具调用）
+# --------------------------------------------------------------------------- #
+@app.post("/diagnose/agent/stream", dependencies=PROTECTED)
+async def diagnose_agent_stream(req: TextRequest):
+    """Agent 模式流式诊断：决策过程实时推送，而不是最后一次性返回。
+
+    事件协议见 ``app.agent.stream_agent``。与一次性接口 ``/diagnose/agent``
+    共用同一套缓存（键相同）：命中缓存时把 trace 逐轮回放，保持"直播中"的观感。
+    """
+    from app.agent import AGENT_PROMPT_VERSION, build_agent_messages, stream_agent
+
+    started = time.perf_counter()
+
+    def _err_stream(msg: str) -> StreamingResponse:
+        return StreamingResponse(
+            iter([_sse_obj({"type": "error", "message": msg}), SSE_DONE]),
+            media_type="text/event-stream",
+        )
+
+    logs = parse_text(req.text)
+    if not logs:
+        _record("/diagnose/agent/stream", started, error=NO_LOG_MSG)
+        return _err_stream(NO_LOG_MSG)
+
+    context = build_context(logs)
+    key = cache_mod.make_key(
+        req.text,
+        model=current_model(),
+        prompt_version=AGENT_PROMPT_VERSION,
+        context_signature=context.cache_signature(),
+        rag_signature="agent",
+    )
+
+    # ---- 缓存命中：把 trace 逐轮回放 + 最终答案逐字回放 ----
+    payload = _read_cached_agent(key)
+    if payload is not None:
+        _record("/diagnose/agent/stream", started, cache_hit=True)
+        session_id = session_mod.store.create(build_agent_messages(context.logs), payload["diagnosis"])
+
+        async def replay():
+            for r in payload.get("trace", {}).get("rounds", []):
+                if r.get("decision") == "tool_call":
+                    yield _sse_obj(
+                        {"type": "tool_call", "round": r["round"], "tool_calls": r["tool_calls"]}
+                    )
+            for piece in cache_mod.chunk_text(json.dumps(payload["diagnosis"], ensure_ascii=False)):
+                yield _sse_obj({"type": "delta", "text": piece})
+            yield _sse_obj({**payload, "type": "done", "cached": True, "session_id": session_id})
+            yield SSE_DONE
+
+        return StreamingResponse(replay(), media_type="text/event-stream")
+
+    # ---- 未命中：桥接同步生成器为 SSE ----
+    async def gen():
+        done_payload: dict = {}
+        error = ""
+        try:
+            async for event in iterate_in_threadpool(stream_agent(context.logs)):
+                if event["type"] == "done":
+                    # 接口边界再次统一契约：旧生成器或测试替身缺 cost_yuan 时也能补齐。
+                    event = {
+                        **event,
+                        "usage": metrics.usage_payload(_usage_from_dict(event.get("usage"))),
+                    }
+                    done_payload = event
+                    # 建会话，session_id 随 done 事件一起给前端
+                    event = {
+                        **event,
+                        "session_id": session_mod.store.create(
+                            build_agent_messages(context.logs), event["diagnosis"]
+                        ),
+                    }
+                elif event["type"] == "error":
+                    error = event["message"]
+                yield _sse_obj(event)
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            yield _sse_obj({"type": "error", "message": error})
+        finally:
+            u = done_payload.get("usage", {})
+            usage = Usage(
+                prompt_tokens=u.get("prompt_tokens", 0),
+                cached_tokens=u.get("cached_tokens", 0),
+                completion_tokens=u.get("completion_tokens", 0),
+            )
+            if done_payload:
+                # 缓存结构与 /diagnose/agent 一致，两个接口互相复用缓存条目
+                cache_mod.cache.set(
+                    key,
+                    json.dumps(
+                        {
+                            "diagnosis": done_payload["diagnosis"],
+                            "trace": done_payload["trace"],
+                            "usage": u,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            trace = done_payload.get("trace", {})
+            _record(
+                "/diagnose/agent/stream",
+                started,
+                usage=usage,
+                error=error,
+                llm_call=True,
+                agent_tool_calls=trace.get("tool_calls_total", 0),
+                agent_rounds=len(trace.get("rounds", [])),
+                agent_forced=trace.get("forced_answer", False),
+            )
+        yield SSE_DONE
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# --------------------------------------------------------------------------- #
+# 多轮追问
+# --------------------------------------------------------------------------- #
+@app.post("/diagnose/followup", dependencies=PROTECTED)
+def followup(req: FollowUpRequest):
+    """在一次诊断的会话里追问。
+
+    会话由诊断接口（/diagnose、/diagnose/stream、/diagnose/agent*）创建，
+    内容 = 诊断时的完整 messages + 诊断结论。追问是自由文本，不要求 JSON。
+    会话 30 分钟不活动过期（见 app/session.py）。
+    """
+    started = time.perf_counter()
+    try:
+        answer, usage = session_mod.store.ask(req.session_id, req.question)
+    except KeyError:
+        _record("/diagnose/followup", started, error="会话不存在或已过期")
+        raise HTTPException(
+            status_code=404,
+            detail="会话不存在或已过期（30 分钟无追问自动销毁），请重新发起诊断",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {exc}"
+        _record("/diagnose/followup", started, error=error, llm_call=True)
+        raise HTTPException(status_code=502, detail=f"模型调用失败：{error}")
+
+    _record("/diagnose/followup", started, usage=usage, llm_call=True)
+    return {
+        "answer": answer,
+        "usage": {
+            "prompt_tokens": usage.prompt_tokens,
+            "cached_tokens": usage.cached_tokens,
+            "completion_tokens": usage.completion_tokens,
+        },
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -473,8 +655,14 @@ def _cache_key(text: str, context: LogContext | None = None) -> str:
     """
     rag_signature = ""
     if context is not None:
-        cases = rag.retrieve(format_logs(context.logs))
-        rag_signature = rag.signature(retrieved_ids=[c.id for c in cases])
+        if rag.rag_mode() == rag.MODE_FIXED:
+            # fixed 模式不检索，签名是常量 —— 直接取，不空跑一趟检索。
+            # dynamic / hybrid 模式下这次检索是真实开销（dense 后端会发 embedding
+            # 请求），属于「为了知道缓存是否有效而付出的成本」，目前接受。
+            rag_signature = rag.signature()
+        else:
+            cases = rag.retrieve(format_logs(context.logs))
+            rag_signature = rag.signature(retrieved_ids=[c.id for c in cases])
 
     return cache_mod.make_key(
         text,
@@ -485,19 +673,65 @@ def _cache_key(text: str, context: LogContext | None = None) -> str:
     )
 
 
-def _canonical(text: str) -> str:
-    """把流式拼出来的文本规范化后再入缓存。
+def _usage_from_dict(raw: object) -> Usage:
+    """把缓存或事件里的用量恢复成 Usage，并容忍旧缓存缺少 cost_yuan。"""
+    data = raw if isinstance(raw, dict) else {}
+    return Usage(
+        prompt_tokens=int(data.get("prompt_tokens", 0) or 0),
+        cached_tokens=int(data.get("cached_tokens", 0) or 0),
+        completion_tokens=int(data.get("completion_tokens", 0) or 0),
+    )
 
-    这样「同步接口写入的缓存」和「流式接口写入的缓存」格式一致，
-    两个接口可以互相复用彼此的缓存条目。
-    """
+
+def _read_cached_diagnosis(key: str) -> dict | None:
+    """读取并校验普通诊断缓存；损坏条目按未命中处理，不让接口 500。"""
+    cached_text = cache_mod.cache.get(key)
+    if cached_text is None:
+        return None
     try:
-        return json.dumps(json.loads(text), ensure_ascii=False)
-    except (json.JSONDecodeError, TypeError):
-        return text
+        result = _parse_json(cached_text)
+        if schema_problems(result):
+            raise ValueError("缓存诊断不符合 schema")
+        return result
+    except (json.JSONDecodeError, TypeError, ValueError):
+        cache_mod.cache.delete(key)
+        return None
+
+
+def _read_cached_agent(key: str) -> dict | None:
+    """读取 Agent 缓存，并为旧条目补齐统一的 usage/cost_yuan 契约。"""
+    cached_text = cache_mod.cache.get(key)
+    if cached_text is None:
+        return None
+    try:
+        payload = json.loads(cached_text)
+        if not isinstance(payload, dict) or schema_problems(payload.get("diagnosis")):
+            raise ValueError("Agent 缓存诊断不符合 schema")
+        trace = payload.get("trace")
+        if not isinstance(trace, dict) or not isinstance(trace.get("rounds", []), list):
+            raise ValueError("Agent 缓存 trace 不合法")
+        return {
+            "diagnosis": payload["diagnosis"],
+            "trace": trace,
+            "usage": metrics.usage_payload(_usage_from_dict(payload.get("usage"))),
+        }
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+        cache_mod.cache.delete(key)
+        return None
 
 
 def _sse(payload: str) -> str:
+    """把**字符串**包成 SSE 事件（delta 文本用这个：data: "片段"）。"""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _sse_obj(payload: dict) -> str:
+    """把**对象**包成 SSE 事件（事件协议用这个：data: {"type": ...}）。
+
+    注意别写成 ``_sse(json.dumps(obj))`` —— 那会双重编码，
+    前端 JSON.parse 得到的是一个字符串，``ev.type`` 永远是 undefined。
+    这个 bug 在空日志的 Agent 流式路径上真实发生过。
+    """
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
@@ -536,7 +770,7 @@ def _record(
             llm_call=llm_call,
             tokens_estimated=tokens_estimated,
             error=error,
-            agent=endpoint == "/diagnose/agent",
+            agent=endpoint.startswith("/diagnose/agent"),
             agent_tool_calls=agent_tool_calls,
             agent_rounds=agent_rounds,
             agent_forced=agent_forced,

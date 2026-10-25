@@ -136,6 +136,10 @@ LogWise/
 │   ├── launcher.py      # 虚拟环境切换 + 控制台窗口停留（供各脚本复用）
 │   ├── apikey.py        # API Key 读取与「占位符」判定（各调用方共用同一套判据）
 │   ├── main.py          # FastAPI 入口 + SSE 流式接口
+│   ├── agent.py         # Agent 循环（手写 ReAct：Function Calling + 轮次上限 + trace）
+│   ├── agent_langgraph.py # 同一套逻辑的 LangGraph 版（编排层对照，可选依赖）
+│   ├── tools.py         # Agent 工具层：工具 Schema + 本地执行 + 统一分发
+│   ├── session.py       # 诊断会话：多轮追问（TTL + LRU + 轮数上限）
 │   ├── parser.py        # 日志解析器（通用 + HDFS 格式）
 │   ├── context.py       # 日志上下文聚合：决定把哪些日志送给模型
 │   ├── diagnose.py      # 诊断引擎（同步 + 异步客户端，采集 token 用量）
@@ -156,8 +160,9 @@ LogWise/
 │   ├── eval_cases.json          # 诊断质量评测集（38 条人工标注用例，5 档难度）
 │   └── fault_cases.jsonl        # 故障案例知识库（56 条「日志 → 诊断」，供检索使用）
 ├── docs/                # 本目录：接口、部署、实验数据、踩坑记录
-├── static/index.html    # 演示页
-├── tests/               # 单元测试（289 项）
+├── static/index.html    # 演示页（static/samples/ 为示例日志）
+├── mcp_server.py        # MCP Server：把案例库暴露给任何 MCP 客户端（独立进程）
+├── tests/               # 单元测试（338 项）
 │   ├── test_parser.py           # 解析器
 │   ├── test_context.py          # 上下文聚合
 │   ├── test_guard.py            # 鉴权 / 限流 / 缓存 / 度量
@@ -169,7 +174,11 @@ LogWise/
 │   ├── test_diagnose.py         # 诊断引擎（结构校验 / 格式重试 / 超时配置）
 │   ├── test_apikey.py           # API Key 占位符判定（含三处调用方的一致性）
 │   ├── test_rag.py              # RAG 注入
-│   └── test_api.py              # HTTP 接口层
+│   ├── test_agent.py            # Agent 循环（含流式事件顺序）
+│   ├── test_agent_langgraph.py  # LangGraph 对比实现（与手写版行为等价）
+│   ├── test_session.py          # 多轮追问（TTL / LRU / 轮数上限 / 失败回滚）
+│   ├── test_mcp_server.py       # MCP Server（工具注册 / 实际检索）
+│   └── test_api.py              # HTTP 接口层（含 SSE 断连不写缓存）
 ├── k8s/                 # Deployment / Service / HPA
 ├── demo_parse.py        # 演示：日志解析
 ├── demo_diagnose.py     # 演示：调用 LLM 诊断

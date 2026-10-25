@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -220,6 +222,243 @@ class TestBadModelOutput:
         detail = r.json()["detail"]
         assert "JSONDecodeError" not in detail, "不该把 Python 异常名甩给用户"
         assert "无法给出结构化诊断" in detail, "应带上模型的原话，便于判断"
+
+
+class TestCacheKeyRetrieval:
+    """fixed 模式下算缓存键不该发起检索。
+
+    ``_cache_key`` 曾经无条件调 ``rag.retrieve``：fixed 模式下它本来就返回空，
+    调用是纯浪费；dense/hybrid 后端时更是一次真实的 embedding 网络请求。
+    """
+
+    def test_fixed_mode_does_not_retrieve(self, monkeypatch):
+        from app import main, rag
+        from app.context import build_context
+        from app.parser import parse_text
+
+        monkeypatch.setenv("LOGWISE_RAG_MODE", "fixed")
+
+        def _boom(query):
+            raise AssertionError("fixed 模式不该发起检索")
+
+        monkeypatch.setattr(rag, "retrieve", _boom)
+        ctx = build_context(parse_text(SMALL_LOG))
+        key = main._cache_key(SMALL_LOG, ctx)
+        assert isinstance(key, str) and len(key) == 64
+
+    def test_fixed_mode_signature_is_stable(self, monkeypatch):
+        """签名必须与旧实现一致 —— 否则优化一次，线上缓存全部失效。"""
+        from app import main, rag
+        from app.context import build_context
+        from app.parser import parse_text
+
+        monkeypatch.setenv("LOGWISE_RAG_MODE", "fixed")
+        ctx = build_context(parse_text(SMALL_LOG))
+        key = main._cache_key(SMALL_LOG, ctx)
+        assert rag.signature() == "fixed"
+        # 同样输入重算一次，键必须相同（签名里没有随机成分）
+        assert main._cache_key(SMALL_LOG, ctx) == key
+
+
+class TestStreamCacheSafety:
+    """SSE 流被客户端中途断开时，**半截结果不能写入缓存**。
+
+    曾经的 bug：``finally`` 里只判断 ``not error and full_text``，
+    而客户端断开（GeneratorExit）时 error 为空、full_text 是截断的 JSON ——
+    这份残缺结果会被写进缓存，下次同一段日志命中后回放出来的就是截断的诊断。
+    """
+
+    LOG = SMALL_LOG
+
+    @staticmethod
+    def _fake_stream(chunks: list[str]):
+        async def _gen(logs, usage):
+            for c in chunks:
+                yield c
+
+        return _gen
+
+    def _drive(self, monkeypatch, chunks: list[str], take: int | None):
+        """跑一遍流式接口。take=None 表示读到结束；否则读 take 个 chunk 后断开。"""
+        import asyncio
+
+        from app import cache as cache_mod
+        from app import main
+
+        monkeypatch.setattr(main, "stream_diagnosis_multi", self._fake_stream(chunks))
+
+        async def _run():
+            resp = main._stream_response(self.LOG)
+            it = resp.body_iterator
+            if take is None:
+                async for _ in it:
+                    pass
+            else:
+                for _ in range(take):
+                    await it.__anext__()
+                await it.aclose()  # 模拟客户端中途断开
+
+        asyncio.run(_run())
+        return cache_mod.cache
+
+    def test_partial_stream_is_not_cached(self, client: TestClient, monkeypatch):
+        from app import cache as cache_mod
+
+        cache_mod.cache.reset()
+        cache = self._drive(monkeypatch, ['{"error_type": "x",', ' "root_cause":'], take=1)
+        assert cache.snapshot()["size"] == 0, "半截结果不该入缓存"
+
+    def test_completed_stream_is_cached(self, client: TestClient, monkeypatch):
+        from app import cache as cache_mod
+
+        cache_mod.cache.reset()
+        payload = json.dumps(TestBadModelOutput.GOOD, ensure_ascii=False)
+        cache = self._drive(monkeypatch, [payload[:30], payload[30:]], take=None)
+        assert cache.snapshot()["size"] == 1, "完整且符合 schema 的流应该入缓存"
+
+    @pytest.mark.parametrize(
+        "chunks",
+        [
+            ["这不是 JSON"],
+            ['{"error_type": "x",'],
+            ['{"error_type": "x"}'],
+        ],
+        ids=["non-json", "truncated-json", "missing-fields"],
+    )
+    def test_invalid_completed_stream_is_not_cached(self, client: TestClient, monkeypatch, chunks):
+        from app import cache as cache_mod
+
+        cache_mod.cache.reset()
+        cache = self._drive(monkeypatch, chunks, take=None)
+        assert cache.snapshot()["size"] == 0, "流结束不代表结果合格，非法诊断不能入缓存"
+
+    def test_corrupt_cache_is_rebuilt_instead_of_500(self, client: TestClient, monkeypatch):
+        from app import cache as cache_mod
+        from app import main
+        from app.context import build_context
+        from app.diagnose import Usage
+        from app.parser import parse_text
+
+        cache_mod.cache.reset()
+        monkeypatch.setenv("LOGWISE_RAG_MODE", "fixed")
+        context = build_context(parse_text(self.LOG))
+        key = main._cache_key(self.LOG, context)
+        cache_mod.cache.set(key, '{"error_type": "x"}')  # 合法 JSON，但缺诊断字段
+        monkeypatch.setattr(
+            main, "diagnose_multi_ex", lambda logs: (TestBadModelOutput.GOOD, Usage())
+        )
+
+        r = client.post("/diagnose", json={"text": self.LOG})
+        assert r.status_code == 200
+        assert r.json()["cached"] is False
+        assert r.json()["diagnosis"] == TestBadModelOutput.GOOD
+        assert main._read_cached_diagnosis(key) == TestBadModelOutput.GOOD
+
+
+class TestAgentStreamEvents:
+    """``/diagnose/agent/stream`` 的事件必须是 **JSON 对象**。
+
+    真实踩过的坑：接口里写成 ``_sse(json.dumps(event))`` 而 ``_sse`` 内部又
+    ``json.dumps`` 一次 —— 线上传出去的是 ``data: "{\\"type\\": ...}"``，
+    也就是一个 JSON **字符串**。前端 ``JSON.parse`` 得到字符串，``ev.type``
+    永远是 undefined，整个 Agent 时间线静默不渲染。这类 bug 单测不覆盖接口层就发现不了。
+    """
+
+    LOG = "2026-10-17 10:00:00,000 ERROR [t] com.example.A - 编码回归用例"
+    DIAG = {
+        "error_type": "磁盘不足",
+        "root_cause": "分区写满",
+        "evidence": ["No space left on device"],
+        "impact": "写入失败",
+        "solution_steps": ["df -h"],
+        "confidence": 0.9,
+    }
+
+    @staticmethod
+    def _events(r) -> list:
+        import json as _json
+
+        out = []
+        for line in r.text.splitlines():
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                continue
+            out.append(_json.loads(payload))
+        return out
+
+    def test_events_are_objects_not_double_encoded(self, client: TestClient, monkeypatch):
+        from app import cache as cache_mod
+
+        cache_mod.cache.reset()
+
+        def fake_stream(logs, max_rounds=None):
+            yield {"type": "tool_call", "round": 1,
+                   "tool_calls": [{"name": "search_fault_cases", "arguments": "{}", "result_excerpt": ""}]}
+            yield {"type": "delta", "text": '{"error_type": "磁盘不足"}'}
+            yield {"type": "done", "diagnosis": self.DIAG,
+                   "usage": {"prompt_tokens": 10, "cached_tokens": 0, "completion_tokens": 5},
+                   "trace": {"rounds": [], "tool_calls_total": 1, "forced_answer": False}}
+
+        monkeypatch.setattr("app.agent.stream_agent", fake_stream)
+        r = client.post("/diagnose/agent/stream", json={"text": self.LOG})
+        assert r.status_code == 200
+
+        events = self._events(r)
+        assert all(isinstance(e, dict) for e in events), "事件必须是对象，不能是双重编码的字符串"
+        assert [e["type"] for e in events] == ["tool_call", "delta", "done"]
+        assert events[-1]["session_id"], "done 事件应带上会话 id（用于追问）"
+        assert events[-1]["usage"] == {
+            "prompt_tokens": 10,
+            "cached_tokens": 0,
+            "completion_tokens": 5,
+            "cost_yuan": 0.00002,
+        }
+
+        # 同一 Agent 缓存从流式接口回放时，usage 契约不能漂移。
+        replay = client.post("/diagnose/agent/stream", json={"text": self.LOG})
+        replay_done = self._events(replay)[-1]
+        assert replay_done["cached"] is True
+        assert replay_done["usage"] == events[-1]["usage"]
+
+    def test_corrupt_agent_cache_is_discarded(self, client: TestClient):
+        from app import cache as cache_mod
+        from app import main
+
+        cache_mod.cache.reset()
+        cache_mod.cache.set("broken-agent", json.dumps({"diagnosis": self.DIAG}))
+        assert main._read_cached_agent("broken-agent") is None
+        assert cache_mod.cache.snapshot()["size"] == 0
+
+    def test_empty_log_error_is_also_object(self, client: TestClient):
+        r = client.post("/diagnose/agent/stream", json={"text": "   "})
+        events = self._events(r)
+        assert len(events) == 1 and events[0]["type"] == "error"
+
+
+class TestNewEndpointsProtected:
+    """新增的 Agent 流式 / 追问接口必须挂上鉴权，别漏了 PROTECTED。"""
+
+    def test_agent_stream_requires_key(self, client: TestClient, monkeypatch):
+        monkeypatch.setenv("LOGWISE_API_KEY", "secret-key")
+        r = client.post("/diagnose/agent/stream", json={"text": "x"})
+        assert r.status_code == 401
+
+    def test_followup_requires_key(self, client: TestClient, monkeypatch):
+        monkeypatch.setenv("LOGWISE_API_KEY", "secret-key")
+        r = client.post("/diagnose/followup", json={"session_id": "x", "question": "?"})
+        assert r.status_code == 401
+
+    def test_correct_key_passes(self, client: TestClient, monkeypatch):
+        monkeypatch.setenv("LOGWISE_API_KEY", "secret-key")
+        r = client.post(
+            "/diagnose/followup",
+            json={"session_id": "x", "question": "?"},
+            headers={"X-API-Key": "secret-key"},
+        )
+        # 带了正确 Key → 走到业务逻辑，会话不存在应 404 而不是 401
+        assert r.status_code == 404
 
 
 class TestHealthHandshake:

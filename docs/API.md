@@ -9,6 +9,9 @@
 | `/context` | GET / POST | **预览上下文聚合结果**：哪些日志会被送给模型 | 否 |
 | `/diagnose` | POST | 解析 + 诊断，一次性返回 JSON | 是 |
 | `/diagnose/stream` | GET / POST | SSE 流式诊断，逐 token 返回 | 是 |
+| `/diagnose/agent` | POST | Agent 模式（Function Calling 循环），一次性返回摘要 + trace | 是 |
+| `/diagnose/agent/stream` | POST | **Agent 模式 SSE**：逐轮推送工具调用与最终答案 | 是 |
+| `/diagnose/followup` | POST | 在诊断会话里多轮追问 | 是 |
 | `/stats` | GET | 运行时度量：请求量 / 耗时 / token / 成本 / 缓存命中率 | 否 |
 | `/stats/reset` | POST | 清零统计与缓存（用于做对照实验） | 否 |
 
@@ -40,13 +43,50 @@
     "evidence": ["..."],
     "...": "..."
   },
-  "cached": false
+  "cached": false,
+  "session_id": "3f2a9c1b7d4e"
 }
 ```
 
 - `log` 是锚点（模型看到的中心）
 - `context.selected` 是连同上下文一起送进去的条数
+- `session_id` 用于后续追问（见下节）；缓存命中的响应同样会建会话
 - 聚合策略见 [`EXPERIMENTS.md` §4](EXPERIMENTS.md#4-上下文聚合)
+
+---
+
+## `/diagnose/agent/stream` 事件协议
+
+`text/event-stream`，每个 `data:` 是一条 JSON（`[DONE]` 结束）：
+
+| `type` | 时机 | 关键字段 |
+| --- | --- | --- |
+| `tool_call` | 每轮工具执行完毕，**立即推送** | `round`、`tool_calls[].name / arguments / result_excerpt` |
+| `delta` | 最终答案输出 | `text`（JSON 字符串片段，拼起来是完整诊断 JSON） |
+| `retry` | 输出格式不合格，正在纠错重试 | `problem` |
+| `done` | 全部完成 | `diagnosis`、`usage`、`trace`、`session_id`、`cached` |
+| `error` | 重试后仍不合格 / 模型异常 | `message` |
+
+> 为什么工具事件要先于答案到达：用户等的是"它在干什么"，而不是"它什么时候结束"。
+> 一次诊断 3~8 秒，有工具调用时可达 15 秒 —— 全程无反馈的等待是现代 Agent 产品最差的体验。
+
+## `/diagnose/followup`
+
+```json
+{ "session_id": "3f2a9c1b7d4e", "question": "第三步具体怎么操作？" }
+```
+
+响应：`{"answer": "...", "usage": {...}}`。
+
+| 状态码 | 场景 |
+| --- | --- |
+| 404 | 会话不存在或已过期（30 分钟无追问自动销毁） |
+| 422 | 问题为空或过长（最多 2000 字） |
+| 502 | 模型调用失败 |
+
+会话内容是**诊断时的完整 messages + 诊断结论**，所以追问能引用日志细节；
+但追问不调工具、不走 RAG —— 它的定位是「解释刚才的诊断」，
+需要重新分析就发起新的诊断请求。最多保留最近 6 轮追问，防止上下文无限膨胀。
 
 ---
 

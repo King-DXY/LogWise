@@ -5,3 +5,9 @@ pydantic>=2.7
 openai>=1.40,<2
 httpx>=0.27
 pytest>=8.0
+
+# ---- 可选：进阶能力（不装也能跑主流程）----
+# MCP Server（mcp_server.py）：把案例库暴露给任何 MCP 客户端
+#   pip install "mcp>=2,<3" -i https://pypi.tuna.tsinghua.edu.cn/simple
+# LangGraph 对比实现（app/agent_langgraph.py）：与手写循环做编排层对照
+#   pip install "langgraph>=1,<2" -i https://pypi.tuna.tsinghua.edu.cn/simple

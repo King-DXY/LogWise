@@ -339,3 +339,63 @@ class TestAgentMetrics:
 
         s = metrics_mod.MetricsStore()
         assert s.summary()["agent"] == {"requests": 0}
+
+
+class TestStreamAgent:
+    """流式 Agent（stream_agent）：决策过程要逐轮吐事件，而不是攒到最后。"""
+
+    def _collect(self, monkeypatch, script, err_log):
+        fake = FakeAgentClient(script)
+        monkeypatch.setattr(agent, "get_client", lambda: fake)
+        return list(agent.stream_agent([err_log]))
+
+    def test_direct_answer_emits_delta_then_done(self, monkeypatch, err_log):
+        monkeypatch.setenv("DEEPSEEK_PRICE_INPUT", "1")
+        monkeypatch.setenv("DEEPSEEK_PRICE_INPUT_CACHED", "0.2")
+        monkeypatch.setenv("DEEPSEEK_PRICE_OUTPUT", "2")
+        events = self._collect(monkeypatch, [GOOD_JSON], err_log)
+        types = [e["type"] for e in events]
+        assert types[0] == "delta"
+        assert types[-1] == "done"
+        assert "tool_call" not in types, "直接回答不该有工具事件"
+        done = events[-1]
+        assert done["diagnosis"]["error_type"] == GOOD["error_type"]
+        assert done["trace"]["tool_calls_total"] == 0
+        assert done["usage"] == {
+            "prompt_tokens": 100,
+            "cached_tokens": 0,
+            "completion_tokens": 50,
+            "cost_yuan": 0.0002,
+        }
+        # delta 拼起来必须等于最终诊断的 JSON
+        text = "".join(e["text"] for e in events if e["type"] == "delta")
+        assert json.loads(text)["error_type"] == GOOD["error_type"]
+
+    def test_tool_call_event_streamed_before_answer(self, monkeypatch, err_log):
+        script = [
+            {"tool_calls": [_tool_call("c1", "lookup_error_type", {"error_type": "quota"})]},
+            GOOD_JSON,
+        ]
+        events = self._collect(monkeypatch, script, err_log)
+        types = [e["type"] for e in events]
+        assert types[0] == "tool_call", "工具调用必须比答案先到 —— 这是流式的意义"
+        assert types[-1] == "done"
+        ev = events[0]
+        assert ev["round"] == 1
+        assert ev["tool_calls"][0]["name"] == "lookup_error_type"
+        assert events[-1]["trace"]["tool_calls_total"] == 1
+
+    def test_format_error_emits_error_event(self, monkeypatch, err_log):
+        events = self._collect(monkeypatch, ["不是 JSON"], err_log)
+        types = [e["type"] for e in events]
+        assert types[-1] == "error"
+        assert "retry" in types, "先纠错重试一次，仍不合格才报错"
+
+    def test_forced_answer_flag_propagates(self, monkeypatch, err_log):
+        # 3 轮（默认上限）都调工具 → 第 4 次调用是「强制收尾」，必须直接回答
+        script = [{"tool_calls": [_tool_call("c1", "lookup_error_type", {"error_type": "x"})]}] * 3
+        events = self._collect(monkeypatch, script + [GOOD_JSON], err_log)
+        done = events[-1]
+        assert done["trace"]["forced_answer"] is True
+        tool_events = [e for e in events if e["type"] == "tool_call"]
+        assert len(tool_events) == 3

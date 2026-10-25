@@ -1,0 +1,18 @@
+2026-09-17 21:14:03,221 INFO [http-nio-8080-exec-3] com.example.order.OrderService - 开始处理订单 orderId=SO20260917001
+
+2026-09-17 21:14:05,884 WARN [HikariPool-1 housekeeper] com.zaxxer.hikari.pool.HikariPool - HikariPool-1 - Thread starvation or clock leap detected (housekeeper delta=6s321ms)
+
+2026-09-17 21:14:31,006 ERROR [http-nio-8080-exec-3] com.example.order.OrderService - 创建订单失败 orderId=SO20260917001
+java.sql.SQLTransientConnectionException: HikariPool-1 - Connection is not available, request timed out after 30000ms.
+	at com.zaxxer.hikari.pool.HikariPool.createTimeoutException(HikariPool.java:696)
+	at com.zaxxer.hikari.pool.HikariPool.getConnection(HikariPool.java:197)
+	at com.zaxxer.hikari.pool.HikariDataSource.getConnection(HikariDataSource.java:128)
+	at com.example.order.OrderRepository.insert(OrderRepository.java:57)
+	at com.example.order.OrderService.createOrder(OrderService.java:88)
+	at java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method)
+	... 43 more
+Caused by: java.net.SocketTimeoutException: Read timed out
+	at java.base/java.net.SocketInputStream.socketRead0(Native Method)
+	at com.mysql.cj.protocol.a.NativeProtocol.readMessage(NativeProtocol.java:562)
+	at com.mysql.cj.protocol.a.NativeProtocol.readServerStatusForResultSets(NativeProtocol.java:823)
+	... 47 more

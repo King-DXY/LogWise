@@ -141,6 +141,11 @@ class DiagnosisCache:
                 self._data.popitem(last=False)
                 self._evictions += 1
 
+    def delete(self, key: str) -> None:
+        """删除损坏或已失效的单条缓存，不影响其他条目与统计。"""
+        with self._lock:
+            self._data.pop(key, None)
+
     def clear(self) -> None:
         """只清缓存数据，**保留**命中/未命中计数。
 

@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Generator
 from dataclasses import dataclass, field
 
+from app import metrics
 from app.diagnose import (
     CORRECTION_PROMPT,
     Usage,
@@ -207,3 +209,147 @@ def run_agent(
 
     trace.rounds.append({"round": len(trace.rounds) + 1, "decision": "answer"})
     return result, usage, trace
+
+
+# --------------------------------------------------------------------------- #
+# 流式版本：把决策过程实时推给前端
+# --------------------------------------------------------------------------- #
+def _emit_text(text: str, size: int = 48):
+    """把一段完整文本切成 delta 事件。
+
+    非流式拿到的最终答案（模型第一轮就直接回答的情况）内容已经完整，
+    切块只是为了前端「逐字出现」的观感与缓存回放一致 —— 与 cache.chunk_text 同理。
+    """
+    for i in range(0, len(text), size):
+        yield {"type": "delta", "text": text[i : i + size]}
+
+
+def stream_agent(
+    logs: list[ParsedLog],
+    max_rounds: int | None = None,
+) -> "Generator[dict, None, None]":
+    """流式 Agent 诊断（同步生成器，由接口层用 iterate_in_threadpool 桥接成 SSE）。
+
+    事件协议（每个事件是一个 dict，接口层负责 JSON 序列化）::
+
+        {"type": "tool_call", "round": n, "tool_calls": [...]}   模型调用了一轮工具
+        {"type": "delta", "text": "..."}                          最终答案的文本增量
+        {"type": "retry", "problem": "..."}                       输出不合格，正在纠错重试
+        {"type": "done", "diagnosis": ..., "usage": ..., "trace": ...}
+        {"type": "error", "message": "..."}                       失败（格式重试后仍不合格）
+
+    决策逻辑与 ``run_agent`` 完全等价，区别只在**每一步都实时吐事件**，
+    而不是攒到最后一次性返回 —— Agent 可观测性从「事后看 trace」变成「直播中」。
+    """
+    from app.diagnose import DiagnosisFormatError  # 避免顶层循环导入
+
+    rounds_limit = max_rounds if max_rounds is not None else max_tool_rounds()
+    messages = build_agent_messages(logs)
+    usage = Usage()
+    trace = AgentTrace()
+    content = ""
+
+    for round_no in range(1, rounds_limit + 1):
+        resp = get_client().chat.completions.create(
+            model=current_model(),
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        usage = _sum_usage(usage, _extract_usage(resp.usage))
+        msg = resp.choices[0].message
+
+        tool_calls = getattr(msg, "tool_calls", None) or []
+        if not tool_calls:
+            content = msg.content or ""
+            break
+
+        messages.append(msg)
+        round_trace = {"round": round_no, "decision": "tool_call", "tool_calls": []}
+        for call in tool_calls:
+            result_text = dispatch_tool(call.function.name, call.function.arguments, logs)
+            round_trace["tool_calls"].append(
+                {
+                    "name": call.function.name,
+                    "arguments": call.function.arguments,
+                    "result_excerpt": result_text[:TRACE_RESULT_EXCERPT],
+                }
+            )
+            messages.append(
+                {"role": "tool", "tool_call_id": call.id, "content": result_text}
+            )
+        trace.rounds.append(round_trace)
+        # 这一轮的工具调用执行完毕，立刻推给前端
+        yield {"type": "tool_call", "round": round_no, "tool_calls": round_trace["tool_calls"]}
+    else:
+        # 轮次用尽：强制收尾（与 run_agent 相同的处理）
+        trace.forced_answer = True
+        messages.append(
+            {
+                "role": "user",
+                "content": "工具调用轮次已用完。请基于目前已有信息直接输出最终诊断 JSON。",
+            }
+        )
+        resp = get_client().chat.completions.create(
+            model=current_model(),
+            messages=messages,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        usage = _sum_usage(usage, _extract_usage(resp.usage))
+        content = resp.choices[0].message.content or ""
+
+    # ---- 格式校验 + 一次纠错重试（与 run_agent 同一套规则） ----
+    result: dict | None = None
+    problems: list[str] = []
+    try:
+        result = _parse_json(content)
+        problems = schema_problems(result)
+    except json.JSONDecodeError:
+        problems = ["返回的内容不是合法 JSON"]
+
+    if problems:
+        yield {"type": "retry", "problem": "；".join(problems)}
+        retry_messages = [
+            *messages,
+            {"role": "assistant", "content": content[:2000]},
+            {"role": "user", "content": CORRECTION_PROMPT.format(problem="；".join(problems))},
+        ]
+        resp = get_client().chat.completions.create(
+            model=current_model(),
+            messages=retry_messages,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+        usage = _sum_usage(usage, _extract_usage(resp.usage))
+        content = resp.choices[0].message.content or ""
+        try:
+            result = _parse_json(content)
+            problems = schema_problems(result)
+        except json.JSONDecodeError:
+            problems = ["返回的内容不是合法 JSON"]
+
+    if problems or result is None:
+        # 与 run_agent 抛 DiagnosisFormatError 对应的流式表达：error 事件
+        yield {
+            "type": "error",
+            "message": f"Agent 模式最终输出不符合格式（{'；'.join(problems)}）。"
+            f"它最后一次说的是：{content.strip()[:200] or '（空）'}",
+        }
+        return
+
+    # 先逐字吐答案，再发 done —— 前端观感与非 Agent 的 SSE 一致
+    yield from _emit_text(_canonical_json(result))
+
+    trace.rounds.append({"round": len(trace.rounds) + 1, "decision": "answer"})
+    yield {
+        "type": "done",
+        "diagnosis": result,
+        "usage": metrics.usage_payload(usage),
+        "trace": trace.as_dict(),
+    }
+
+
+def _canonical_json(result: dict) -> str:
+    return json.dumps(result, ensure_ascii=False)
